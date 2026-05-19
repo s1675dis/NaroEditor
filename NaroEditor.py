@@ -13,14 +13,7 @@ import time
 import shutil
 import ctypes
 import ctypes.wintypes
-import html as _html
 import chardet
-
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
-    _WEB = True
-except ImportError:
-    _WEB = False
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPlainTextEdit, QTextEdit,
@@ -29,15 +22,16 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QFrame, QTreeView, QTabWidget, QTabBar,
     QTextBrowser, QComboBox, QInputDialog, QMenu,
 )
-from PyQt6.QtCore import Qt, QRect, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher
+from PyQt6.QtCore import Qt, QRect, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF
 from PyQt6.QtGui import (
-    QFont, QFontMetrics, QPainter, QColor, QTextCursor, QKeySequence,
+    QFont, QFontMetrics, QFontMetricsF, QPainter, QColor, QTextCursor, QKeySequence,
     QTextOption, QStandardItemModel, QStandardItem,
-    QTextFormat, QPalette, QPen, QPolygon, QCursor, QPixmap, QIcon,
+    QTextFormat, QTextFrameFormat, QTextCharFormat, QTextBlockFormat,
+    QTextObjectInterface, QPalette, QPen, QPolygon, QCursor, QPixmap, QIcon,
 )
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette
@@ -372,226 +366,107 @@ def detect_encoding(data: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Narou (小説家になろう) format helpers
+# Narou / Pixiv format — 正規表現（プレビュー描画と共用）
 # ---------------------------------------------------------------------------
-_RE_EMPH  = re.compile(r'《《([^《》\n]+?)》》')
-_RE_RUBY1 = re.compile(r'\|([^|《》\n]+?)《([^《》\n]+?)》')
-_RE_RUBY2 = re.compile(
-    r'([一-鿿㐀-䶿々豈-﫿]+)《([^《》\n]+?)》'
-)
-# Pixiv format [[rb:base > reading]] -- matched post html.escape so ">" becomes "&gt;"
-_RE_RUBY_PIXIV = re.compile(r'\[\[rb:([^\]\n]+?)\s*&gt;\s*([^\]\n]+?)\]\]')
-_RE_HR_LINE = re.compile(r'^[─━ー＝－\-=]{3,}$')
-
-
-def _ruby_html(base: str, reading: str) -> str:
-    return f'<ruby>{base}<rp>（</rp><rt>{reading}</rt><rp>）</rp></ruby>'
-
-
-def _ruby_paren(base: str, reading: str) -> str:
-    return f'{base}（{reading}）'
-
-
-def _emph_html(text: str) -> str:
-    return ''.join(f'<ruby>{c}<rt>・</rt></ruby>' for c in text)
-
-
-def _narou_to_html(text: str) -> str:
-    out = _html.escape(text)
-    if _WEB:
-        out = _RE_EMPH.sub(lambda m: _emph_html(m.group(1)), out)
-        out = _RE_RUBY_PIXIV.sub(lambda m: _ruby_html(m.group(1).strip(), m.group(2).strip()), out)
-        out = _RE_RUBY1.sub(lambda m: _ruby_html(m.group(1), m.group(2)), out)
-        out = _RE_RUBY2.sub(lambda m: _ruby_html(m.group(1), m.group(2)), out)
-    else:
-        out = _RE_EMPH.sub(r'\1', out)
-        out = _RE_RUBY_PIXIV.sub(lambda m: _ruby_paren(m.group(1).strip(), m.group(2).strip()), out)
-        out = _RE_RUBY1.sub(lambda m: _ruby_paren(m.group(1), m.group(2)), out)
-        out = _RE_RUBY2.sub(lambda m: _ruby_paren(m.group(1), m.group(2)), out)
-    parts: list[str] = []
-    for line in out.split('\n'):
-        stripped = line.rstrip()
-        if not stripped:
-            parts.append('<p><br></p>')
-        elif _RE_HR_LINE.match(stripped):
-            parts.append(f'<p class="p-hr">{stripped}</p>')
-        else:
-            parts.append(f'<p>{stripped}</p>')
-    return '\n'.join(parts)
-
+_RE_EMPH           = re.compile(r'《《([^《》\n]+?)》》')
+_RE_RUBY1          = re.compile(r'\|([^|《》\n]+?)《([^《》\n]+?)》')
+_RE_RUBY2          = re.compile(r'([一-鿿㐀-䶿々ヶ豈-﩯]+)《([^《》\n]+?)》')
+_RE_RUBY_PIXIV_RAW = re.compile(r'\[\[rb:([^\]\n]+?)\s*>\s*([^\]\n]+?)\]\]')
+_RE_EMPH_PIXIV_RAW = re.compile(r'\[\[emphasismark:([^\]\n]+?)\s*>\s*([^\]]*)\]\]')
+_RE_HR_LINE        = re.compile(r'^[─━ー＝－\-=]{3,}$')
 
 # ---------------------------------------------------------------------------
-# Preview themes
-# CSS sources:
-#   なろう   : static.syosetu.com/novelview/css/p_novel-pc.css
-#   カクヨム : cdn-static.kakuyomu.jp/css/kakuyomu.css
-#   Pixiv    : s.pximg.net (CSS-in-JS; values from Charcoal design system)
-#   Fanbox   : s.pximg.net/www/js/fanbox/commons.*.js
+# Preview themes（QTextBrowser 用）
 # ---------------------------------------------------------------------------
-_CSS_RESET = "*{margin:0;padding:0;box-sizing:border-box}"
-_CSS_RUBY  = (
-    "p ruby{white-space:initial}"
-    "ruby rt{font-size:8px;line-height:1;text-align:center;font-style:normal;}"
-    ".p-hr{text-align:center;color:#999}"
-)
-
-_CSS_NAROU = _CSS_RESET + """
-html,body{
-    background:#fff;color:#444;
-    font-family:"メイリオ",Meiryo,"Hiragino Kaku Gothic ProN","ヒラギノ角ゴ ProN W3",sans-serif;
-    font-size:14px;word-wrap:break-word;word-break:normal;-webkit-text-size-adjust:100%;
-}
-.l-main{width:730px;margin:0 auto;padding-bottom:80px;}
-h1.p-novel__title{
-    font-size:27.2px;font-weight:700;text-align:center;line-height:1.5;
-    margin-top:90px;margin-bottom:8px;color:#444;
-}
-.p-novel{font-family:"メイリオ",Meiryo,"Hiragino Kaku Gothic ProN","ヒラギノ角ゴ ProN W3",sans-serif;}
-.p-novel__body{font-size:16px;line-height:1.8;margin-bottom:50px;}
-.p-novel__text{width:592px;margin-right:auto;margin-left:auto;}
-.p-novel__text p{
-    font-size:inherit;line-height:inherit;white-space:break-spaces;color:#444;overflow-wrap:break-word;
-}
-""" + _CSS_RUBY
-
-# カクヨム: 游明朝 serif / 17.5px / 1.8 / max-width 665px / title #0081C2
-_CSS_KAKUYOMU = _CSS_RESET + """
-html,body{
-    background:#fff;color:#222;
-    font-family:dcsymbols,"游明朝",YuMincho,"ヒラギノ明朝 ProN","Hiragino Mincho ProN",
-                HiraMinProN-W3,"HGS明朝B","HG明朝B",serif;
-    font-size:17.5px;word-wrap:break-word;word-break:normal;-webkit-text-size-adjust:100%;
-}
-.kyw-main{max-width:665px;margin:0 auto;padding:0 16px 80px;}
-.kyw-title{
-    font-family:"ヒラギノ角ゴ Pr6N","Hiragino Kaku Gothic Pr6N","ヒラギノ角ゴシック",sans-serif;
-    font-size:1.5em;font-weight:400;text-align:center;line-height:1.5;
-    margin:2rem auto 60px;color:#222;
-}
-.kyw-body{font-size:17.5px;line-height:1.8;}
-.kyw-text p{
-    font-size:inherit;line-height:inherit;white-space:break-spaces;color:#222;overflow-wrap:break-word;
-}
-""" + _CSS_RUBY
-
-# Pixiv小説 游明朝: serif / 16px / 1.75 / max-width 680px / text #1f1f1f
-_CSS_PIXIV_MINCHO = _CSS_RESET + """
-html,body{
-    background:#fff;color:#1f1f1f;
-    font-family:"游明朝",YuMincho,"ヒラギノ明朝 ProN","Hiragino Mincho ProN",
-                "Source Han Serif JP","Noto Serif JP",serif;
-    font-size:16px;word-wrap:break-word;word-break:normal;-webkit-text-size-adjust:100%;
-}
-.pxv-main{max-width:680px;margin:0 auto;padding:0 20px 80px;}
-.pxv-title{
-    font-size:24px;font-weight:700;text-align:left;line-height:1.5;
-    margin-top:60px;margin-bottom:24px;color:#1f1f1f;
-}
-.pxv-body{font-size:16px;line-height:1.75;}
-.pxv-text p{
-    font-size:inherit;line-height:inherit;white-space:break-spaces;color:#1f1f1f;overflow-wrap:break-word;
-}
-""" + _CSS_RUBY
-
-# Pixiv小説 游ゴシック: sans-serif / 16px / 1.75 / max-width 680px / text #1f1f1f
-_CSS_PIXIV_GOTHIC = _CSS_RESET + """
-html,body{
-    background:#fff;color:#1f1f1f;
-    font-family:"游ゴシック",YuGothic,"ヒラギノ角ゴ ProN","Hiragino Kaku Gothic ProN",
-                Meiryo,"Source Han Sans JP","Noto Sans CJK JP",sans-serif;
-    font-size:16px;word-wrap:break-word;word-break:normal;-webkit-text-size-adjust:100%;
-}
-.pxv-main{max-width:680px;margin:0 auto;padding:0 20px 80px;}
-.pxv-title{
-    font-size:24px;font-weight:700;text-align:left;line-height:1.5;
-    margin-top:60px;margin-bottom:24px;color:#1f1f1f;
-}
-.pxv-body{font-size:16px;line-height:1.75;}
-.pxv-text p{
-    font-size:inherit;line-height:inherit;white-space:break-spaces;color:#1f1f1f;overflow-wrap:break-word;
-}
-""" + _CSS_RUBY
-
-# Pixiv Fanbox: Noto Sans JP / 14px / line-height 24px / カード UI / bg #f7f7f7
-_CSS_FANBOX = _CSS_RESET + """
-html,body{
-    background:#f7f7f7;color:#1f1f1f;
-    font-family:"Noto Sans JP","Helvetica Neue",Roboto,sans-serif;
-    font-size:14px;word-wrap:break-word;word-break:normal;-webkit-text-size-adjust:100%;
-}
-.fbx-outer{max-width:760px;margin:0 auto;padding:40px 20px 80px;}
-.fbx-card{background:#fff;border-radius:4px;padding:40px;box-shadow:0 1px 4px rgba(0,0,0,.1);}
-.fbx-title{
-    font-size:30px;font-weight:700;text-align:left;line-height:36px;
-    margin-top:0;margin-bottom:24px;color:#1f1f1f;
-}
-.fbx-body{font-size:14px;line-height:24px;}
-.fbx-text p{
-    font-size:inherit;line-height:inherit;white-space:break-spaces;color:#1f1f1f;overflow-wrap:break-word;
-}
-""" + _CSS_RUBY
-
-
-def _wrap_narou(body: str, title: str) -> str:
-    th = f'<h1 class="p-novel__title">{_html.escape(title)}</h1>\n' if title else ""
-    return (
-        '<body><div class="l-main"><article class="p-novel">'
-        f'{th}'
-        '<div class="p-novel__body"><div class="p-novel__text">'
-        f'{body}'
-        '</div></div></article></div></body>'
-    )
-
-
-def _wrap_kakuyomu(body: str, title: str) -> str:
-    th = f'<h2 class="kyw-title">{_html.escape(title)}</h2>\n' if title else ""
-    return (
-        f'<body><div class="kyw-main">{th}'
-        '<div class="kyw-body"><div class="kyw-text">'
-        f'{body}'
-        '</div></div></div></body>'
-    )
-
-
-def _wrap_pixiv(body: str, title: str) -> str:
-    th = f'<h1 class="pxv-title">{_html.escape(title)}</h1>\n' if title else ""
-    return (
-        f'<body><div class="pxv-main">{th}'
-        '<div class="pxv-body"><div class="pxv-text">'
-        f'{body}'
-        '</div></div></div></body>'
-    )
-
-
-def _wrap_fanbox(body: str, title: str) -> str:
-    th = f'<h1 class="fbx-title">{_html.escape(title)}</h1>\n' if title else ""
-    return (
-        f'<body><div class="fbx-outer"><div class="fbx-card">{th}'
-        '<div class="fbx-body"><div class="fbx-text">'
-        f'{body}'
-        '</div></div></div></div></body>'
-    )
-
+_RUBY_RT_PX    = 8
+_RUBY_OBJ_TYPE = int(QTextFormat.ObjectTypes.UserObject) + 1
+_PROP_BASE     = int(QTextFormat.Property.UserProperty)  + 1
+_PROP_READING  = int(QTextFormat.Property.UserProperty)  + 2
 
 _THEMES: dict[str, dict] = {
-    "narou":         {"label": "小説家になろう",      "view_width": 760, "css": _CSS_NAROU,         "wrap": _wrap_narou},
-    "kakuyomu":      {"label": "カクヨム",             "view_width": 730, "css": _CSS_KAKUYOMU,      "wrap": _wrap_kakuyomu},
-    "pixiv_mincho":  {"label": "Pixiv小説（游明朝）",  "view_width": 740, "css": _CSS_PIXIV_MINCHO,  "wrap": _wrap_pixiv},
-    "pixiv_gothic":  {"label": "Pixiv小説（游ゴシック）", "view_width": 740, "css": _CSS_PIXIV_GOTHIC, "wrap": _wrap_pixiv},
-    "fanbox":        {"label": "Pixiv Fanbox",         "view_width": 880, "css": _CSS_FANBOX,        "wrap": _wrap_fanbox},
+    "narou": {
+        "label":        "小説家になろう",
+        "ruby_nudge":   5,
+        "font_qt":      "Meiryo",
+        "font_px":      16,
+        "line_height":  1.8,
+        "fg":           "#444444",
+        "title_px":     27.2,
+        "title_weight": "bold",
+        "title_align":  "center",
+        "title_fg":     "#444444",
+        "title_lh":     1.5,
+        "title_mt":     50,
+        "title_mb":     20,
+        "content_w":    592,
+    },
+    "kakuyomu": {
+        "label":        "カクヨム",
+        "ruby_nudge":   3,
+        "font_qt":      "游明朝",
+        "font_px":      17.5,
+        "line_height":  1.8,
+        "fg":           "#222222",
+        "title_px":     26.25,
+        "title_weight": "normal",
+        "title_align":  "center",
+        "title_fg":     "#222222",
+        "title_lh":     1.5,
+        "title_mt":     35,
+        "title_mb":     60,
+        "content_w":    665,
+    },
+    "pixiv_mincho": {
+        "label":        "Pixiv小説（游明朝）",
+        "ruby_nudge":   3,
+        "font_qt":      "游明朝",
+        "font_px":      16,
+        "line_height":  1.75,
+        "fg":           "#1f1f1f",
+        "title_px":     24,
+        "title_weight": "bold",
+        "title_align":  "left",
+        "title_fg":     "#1f1f1f",
+        "title_lh":     1.5,
+        "title_mt":     60,
+        "title_mb":     24,
+        "content_w":    680,
+    },
+    "pixiv_gothic": {
+        "label":        "Pixiv小説（游ゴシック）",
+        "ruby_nudge":   3,
+        "font_qt":      "游ゴシック",
+        "font_px":      16,
+        "line_height":  1.75,
+        "fg":           "#1f1f1f",
+        "title_px":     24,
+        "title_weight": "bold",
+        "title_align":  "left",
+        "title_fg":     "#1f1f1f",
+        "title_lh":     1.5,
+        "title_mt":     60,
+        "title_mb":     24,
+        "content_w":    680,
+    },
+    "fanbox": {
+        "label":        "Pixiv Fanbox",
+        "ruby_nudge":   5,
+        "font_qt":      "Meiryo",
+        "font_px":      16,
+        "line_height":  36 / 16,
+        "fg":           "#202020",
+        "title_px":     30,
+        "title_weight": "bold",
+        "title_align":  "left",
+        "title_fg":     "#333333",
+        "title_lh":     36 / 30,
+        "title_mt":     0,
+        "title_mb":     24,
+        "content_w":    680,
+    },
 }
 _THEME_ORDER = ["narou", "kakuyomu", "pixiv_mincho", "pixiv_gothic", "fanbox"]
-
-
-def _build_preview_html(text: str, title: str = "", theme_id: str = "narou") -> str:
-    th = _THEMES.get(theme_id) or _THEMES["narou"]
-    body = _narou_to_html(text)
-    return (
-        '<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">'
-        f'<style>{th["css"]}</style></head>'
-        f'{th["wrap"](body, title)}'
-        '</html>'
-    )
+_PREVIEW_MIN_W = 880
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1384,258 @@ class FileTreePanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# RubyTextObject — QTextObjectInterface でルビをインライン描画
+# ---------------------------------------------------------------------------
+class RubyTextObject(QObject, QTextObjectInterface):
+    """
+    Qt rich text engine はネイティブ <ruby> 未対応のため、
+    QTextObjectInterface でインラインオブジェクトとして描画する。
+    intrinsicSize.height = body_fm.ascent() として行高さへの影響をゼロにする。
+    読み仮名の描画は PreviewBrowser.paintEvent のオーバーレイで行う。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nudge: int = 3  # px: 読み仮名を下方向へオフセット（テーマごとに上書き）
+
+    def intrinsicSize(self, doc, posInDocument, fmt):
+        base    = fmt.property(_PROP_BASE)    or ""
+        reading = fmt.property(_PROP_READING) or ""
+        body_fm = QFontMetricsF(doc.defaultFont())
+        rt_font = QFont(doc.defaultFont())
+        rt_font.setPixelSize(_RUBY_RT_PX)
+        rt_fm   = QFontMetricsF(rt_font)
+        w = max(body_fm.horizontalAdvance(base),
+                rt_fm.horizontalAdvance(reading))
+        h = body_fm.ascent()
+        return QSizeF(w, h)
+
+    def drawObject(self, painter, rect, doc, posInDocument, fmt):
+        base      = fmt.property(_PROP_BASE) or ""
+        body_font = doc.defaultFont()
+        body_fm   = QFontMetricsF(body_font)
+        w = rect.width()
+        painter.save()
+        painter.setFont(body_font)
+        x_base = rect.x() + (w - body_fm.horizontalAdvance(base)) / 2.0
+        painter.drawText(QPointF(x_base, rect.bottom()), base)
+        painter.restore()
+
+
+# ---------------------------------------------------------------------------
+# PreviewBrowser — QTextBrowser ベースのルビ対応プレビューウィジェット
+# ---------------------------------------------------------------------------
+class PreviewBrowser(QTextBrowser):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._theme: dict = _THEMES["narou"]
+        self.setOpenLinks(False)
+        self.setReadOnly(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._ruby_obj = RubyTextObject(self)
+        self._ruby_obj.nudge = self._theme.get("ruby_nudge", 3)
+        self.document().documentLayout().registerHandler(
+            _RUBY_OBJ_TYPE, self._ruby_obj)
+
+        self._rubies: list[tuple[int, str, str]] = []
+
+    def set_theme(self, theme_id: str) -> None:
+        self._theme = _THEMES.get(theme_id, _THEMES["narou"])
+        self._ruby_obj.nudge = self._theme.get("ruby_nudge", 3)
+        self.setMinimumWidth(_PREVIEW_MIN_W)
+
+    def update_preview(self, body: str, title: str = "") -> None:
+        th = self._theme
+
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Text, QColor(th["fg"]))
+        self.setPalette(pal)
+
+        body_font = QFont(th["font_qt"])
+        body_font.setPixelSize(round(th["font_px"]))
+        body_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        doc = self.document()
+        doc.setDefaultFont(body_font)
+
+        doc.clear()
+        self._rubies.clear()
+        cursor = QTextCursor(doc)
+
+        body_char = QTextCharFormat()
+        body_char.setFont(body_font)
+        body_char.setForeground(QColor(th["fg"]))
+
+        body_block = QTextBlockFormat()
+        body_block.setTopMargin(0)
+        body_block.setBottomMargin(0)
+        # FixedHeight (type=2): CSS line-height と同じ計算（font_px × line_height px）
+        body_block.setLineHeight(round(th["font_px"] * th["line_height"]), 2)
+
+        if title.strip():
+            t_font = QFont(th["font_qt"])
+            t_font.setPixelSize(round(th["title_px"]))
+            t_font.setBold(th["title_weight"] == "bold")
+            t_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+
+            t_char = QTextCharFormat()
+            t_char.setFont(t_font)
+            t_char.setForeground(QColor(th["title_fg"]))
+
+            t_block = QTextBlockFormat()
+            t_block.setTopMargin(th["title_mt"])
+            t_block.setBottomMargin(th["title_mb"])
+            t_block.setLineHeight(round(th["title_px"] * th["title_lh"]), 2)
+            _ALIGN = {
+                "center": Qt.AlignmentFlag.AlignHCenter,
+                "right":  Qt.AlignmentFlag.AlignRight,
+                "left":   Qt.AlignmentFlag.AlignLeft,
+            }
+            t_block.setAlignment(_ALIGN.get(th["title_align"],
+                                             Qt.AlignmentFlag.AlignLeft))
+
+            cursor.setBlockFormat(t_block)
+            cursor.setCharFormat(t_char)
+            cursor.insertText(title.strip())
+            cursor.insertBlock(body_block, body_char)
+
+        lines = body.split("\n")
+        first = True
+        for line in lines:
+            if not first:
+                cursor.insertBlock(body_block, body_char)
+            first = False
+            cursor.setBlockFormat(body_block)
+            self._insert_line(cursor, line, body_char)
+
+        self._apply_margins()
+
+    def _insert_line(self, cursor: QTextCursor,
+                     line: str, base_fmt: QTextCharFormat) -> None:
+        s = line.rstrip()
+        if not s:
+            return
+
+        if _RE_HR_LINE.match(s):
+            hr_fmt = QTextCharFormat(base_fmt)
+            hr_fmt.setForeground(QColor("#999999"))
+            hr_block = QTextBlockFormat(cursor.blockFormat())
+            hr_block.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            cursor.setBlockFormat(hr_block)
+            cursor.setCharFormat(hr_fmt)
+            cursor.insertText(s)
+            return
+
+        segs: list[tuple[int, int, str, re.Match]] = []
+        for pat, kind in (
+            (_RE_EMPH_PIXIV_RAW, "emph_pixiv"),
+            (_RE_EMPH,           "emph"),
+            (_RE_RUBY_PIXIV_RAW, "ruby"),
+            (_RE_RUBY1,          "ruby"),
+            (_RE_RUBY2,          "ruby"),
+        ):
+            for m in pat.finditer(s):
+                segs.append((m.start(), m.end(), kind, m))
+        segs.sort(key=lambda x: x[0])
+
+        filtered: list[tuple[int, int, str, re.Match]] = []
+        pos = 0
+        for seg in segs:
+            if seg[0] >= pos:
+                filtered.append(seg)
+                pos = seg[1]
+
+        text_pos = 0
+        for start, end, kind, m in filtered:
+            if start > text_pos:
+                cursor.setCharFormat(base_fmt)
+                cursor.insertText(s[text_pos:start])
+
+            if kind == "ruby":
+                self._insert_ruby(cursor, m.group(1), m.group(2).strip(), base_fmt)
+            elif kind == "emph":
+                for c in m.group(1):
+                    self._insert_ruby(cursor, c, "・", base_fmt)
+            elif kind == "emph_pixiv":
+                dot = m.group(2).strip() or "﹅"
+                for c in m.group(1).strip():
+                    self._insert_ruby(cursor, c, dot, base_fmt)
+
+            text_pos = end
+
+        if text_pos < len(s):
+            cursor.setCharFormat(base_fmt)
+            cursor.insertText(s[text_pos:])
+
+    def _insert_ruby(self, cursor: QTextCursor,
+                     base: str, reading: str,
+                     base_fmt: QTextCharFormat) -> None:
+        self._rubies.append((cursor.position(), base, reading))
+        fmt = QTextCharFormat(base_fmt)
+        fmt.setObjectType(_RUBY_OBJ_TYPE)
+        fmt.setProperty(_PROP_BASE,    base)
+        fmt.setProperty(_PROP_READING, reading)
+        cursor.insertText("\uFFFC", fmt)   # U+FFFC Object Replacement Character
+
+    def _apply_margins(self) -> None:
+        th = self._theme
+        vw = self.viewport().width()
+        side = max(16, (vw - th["content_w"]) // 2)
+        fmt = QTextFrameFormat()
+        fmt.setLeftMargin(side)
+        fmt.setRightMargin(side)
+        fmt.setTopMargin(20)
+        fmt.setBottomMargin(40)
+        self.document().rootFrame().setFrameFormat(fmt)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._rubies:
+            return
+
+        doc     = self.document()
+        body_fm = QFontMetricsF(doc.defaultFont())
+        rt_font = QFont(doc.defaultFont())
+        rt_font.setPixelSize(_RUBY_RT_PX)
+        rt_fm   = QFontMetricsF(rt_font)
+        nudge   = self._ruby_obj.nudge
+
+        painter = QPainter(self.viewport())
+        painter.translate(QPointF(-self.horizontalScrollBar().value(),
+                                  -self.verticalScrollBar().value()))
+        painter.setFont(rt_font)
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+
+        for doc_pos, base, reading in self._rubies:
+            block = doc.findBlock(doc_pos)
+            if not block.isValid():
+                continue
+            layout = block.layout()
+            if layout is None:
+                continue
+            pos_in_block = doc_pos - block.position()
+            line = layout.lineForTextPosition(pos_in_block)
+            if not line.isValid():
+                continue
+            lx    = line.cursorToX(pos_in_block)[0]
+            obj_w = max(body_fm.horizontalAdvance(base),
+                        rt_fm.horizontalAdvance(reading))
+            rt_w  = rt_fm.horizontalAdvance(reading)
+            doc_x = layout.position().x() + lx + (obj_w - rt_w) / 2.0
+            baseline = (layout.position().y()
+                        + line.position().y()
+                        + line.ascent())
+            doc_y = baseline - body_fm.ascent() - rt_fm.descent() + nudge
+            painter.drawText(QPointF(doc_x, doc_y), reading)
+
+        painter.end()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_margins()
+
+
+# ---------------------------------------------------------------------------
 # Preview panel (embeddable widget — toolbar + viewer + autoscroll)
 # ---------------------------------------------------------------------------
 class PreviewPane(QWidget):
@@ -1522,7 +1649,6 @@ class PreviewPane(QWidget):
         super().__init__(parent)
 
         self._theme_id = _load_cfg().get("preview_theme", "narou")
-        self._docked   = False
 
         self._autoscroll_active = False
         self._autoscroll_anchor = QPoint()
@@ -1542,8 +1668,8 @@ class PreviewPane(QWidget):
     def theme_id(self) -> str:
         return self._theme_id
 
-    def set_content(self, html: str) -> None:
-        self._view.setHtml(html)
+    def set_content(self, body: str, title: str = "") -> None:
+        self._view.update_preview(body, title)
 
     def sync_theme(self) -> None:
         """Re-read config theme and update combo silently (no signal emit)."""
@@ -1555,16 +1681,14 @@ class PreviewPane(QWidget):
         self._theme_combo.blockSignals(True)
         self._theme_combo.setCurrentIndex(idx)
         self._theme_combo.blockSignals(False)
-        if not self._docked:
-            vw = _THEMES.get(theme_id, _THEMES["narou"])["view_width"]
-            self._view.setFixedWidth(vw)
+        self._view.set_theme(theme_id)
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         self.setStyleSheet("""
-            QWidget          { background: #fff; color: #333; }
+            QWidget          { color: #333; }
             #previewToolbar  { background: #f0f0f0; border-bottom: 1px solid #d0d0d0; }
             QLabel           { color: #333; background: transparent; }
             QComboBox {
@@ -1616,37 +1740,16 @@ class PreviewPane(QWidget):
         self._dock_btn.clicked.connect(self.dock_toggled)
         tl.addWidget(self._dock_btn)
 
-        if _WEB:
-            self._view = _QWebEngineView()
-            self._view.setZoomFactor(1.0)
-        else:
-            self._view = QTextBrowser()
-            self._view.setOpenLinks(False)
-            p = self._view.palette()
-            p.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
-            p.setColor(QPalette.ColorRole.Text, QColor("#444444"))
-            self._view.setPalette(p)
-            self._view.setFont(QFont("Meiryo", 11))
-
-        vw = _THEMES.get(self._theme_id, _THEMES["narou"])["view_width"]
-        self._view.setFixedWidth(vw)
-
-        row = QWidget()
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(0)
-        rl.addStretch()
-        rl.addWidget(self._view)
-        rl.addStretch()
+        self._view = PreviewBrowser()
+        self._view.set_theme(self._theme_id)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(toolbar)
-        outer.addWidget(row, 1)
+        outer.addWidget(self._view, 1)
 
     def set_dock_mode(self, docked: bool) -> None:
-        self._docked = docked
         self._dock_btn.setText("独立ウィンドウ" if docked else "ドッキング")
 
     def _on_theme_changed(self, index: int) -> None:
@@ -1654,9 +1757,7 @@ class PreviewPane(QWidget):
         cfg = _load_cfg()
         cfg["preview_theme"] = self._theme_id
         _save_cfg(cfg)
-        if not self._docked:
-            vw = _THEMES.get(self._theme_id, _THEMES["narou"])["view_width"]
-            self._view.setFixedWidth(vw)
+        self._view.set_theme(self._theme_id)
         self.theme_changed.emit()
 
     # ------------------------------------------------------------------
@@ -1729,11 +1830,8 @@ class PreviewPane(QWidget):
         step = int(self._scroll_accum)
         if step:
             self._scroll_accum -= step
-            if _WEB:
-                self._view.page().runJavaScript(f"window.scrollBy(0,{step});")
-            else:
-                bar = self._view.verticalScrollBar()
-                bar.setValue(bar.value() + step)
+            bar = self._view.verticalScrollBar()
+            bar.setValue(bar.value() + step)
 
 
 # ---------------------------------------------------------------------------
@@ -1750,10 +1848,9 @@ class PreviewWindow(QWidget):
         self._pane.theme_changed.connect(self._on_pane_theme_changed)
         self._pane.dock_toggled.connect(self.dock_toggled)
 
-        vw = _THEMES.get(self._pane.theme_id, _THEMES["narou"])["view_width"]
         self.setWindowTitle("プレビュー")
-        self.resize(vw, 900)
-        self.setMinimumWidth(vw)
+        self.resize(_PREVIEW_MIN_W, 900)
+        self.setMinimumWidth(_PREVIEW_MIN_W)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1764,12 +1861,10 @@ class PreviewWindow(QWidget):
     def theme_id(self) -> str:
         return self._pane.theme_id
 
-    def set_content(self, html: str) -> None:
-        self._pane.set_content(html)
+    def set_content(self, body: str, title: str = "") -> None:
+        self._pane.set_content(body, title)
 
     def _on_pane_theme_changed(self) -> None:
-        vw = _THEMES.get(self._pane.theme_id, _THEMES["narou"])["view_width"]
-        self.setMinimumWidth(vw)
         self.theme_changed.emit()
 
     def closeEvent(self, event) -> None:
@@ -1808,7 +1903,6 @@ class _TabBar(QTabBar):
 class _TabDragFloat(QWidget):
     # Colors matching QTabBar::tab:selected stylesheet values
     _BG     = QColor(40,  44,  52,  200)   # C['bg']    #282c34, ~80% opacity
-    _BAR_BG = QColor(29,  33,  38,  200)   # C['bg_bar'] #1d2126, for side/bottom
     _ACCENT = QColor(97,  175, 239, 220)   # C['accent'] #61afef
     _BORDER = QColor(24,  26,  31,  200)   # C['border'] #181a1f
     _FG     = QColor(171, 178, 191, 220)   # C['fg']     #abb2bf
@@ -1943,15 +2037,12 @@ class NaroEditor(QMainWindow):
         _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NaroEditor.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
-        geom = _load_cfg().get("window_geometry")
+        cfg = _load_cfg()
+        geom = cfg.get("window_geometry")
         if geom:
             self.restoreGeometry(QByteArray(bytes.fromhex(geom)))
         self._preview: PreviewWindow | None = None
-        self._preview_mode: str = _load_cfg().get("preview_mode", "float")
-        self._prev_timer = QTimer(self)
-        self._prev_timer.setSingleShot(True)
-        self._prev_timer.setInterval(300)
-        self._prev_timer.timeout.connect(self._do_preview_update)
+        self._preview_mode: str = cfg.get("preview_mode", "float")
         self._drag_editor: CodeEditor | None = None
         self._drag_pane: QTabWidget | None = None
         self._drag_mode: str = ""          # "" | "slide" | "float"
@@ -1963,7 +2054,7 @@ class NaroEditor(QMainWindow):
         self._lock_mgr = FileLockManager()
         self._build_ui()
         self._build_menu()
-        self._restore_session()
+        QTimer.singleShot(0, self._restore_session)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
     # ------------------------------------------------------------------
@@ -2440,7 +2531,7 @@ class NaroEditor(QMainWindow):
             lambda mod, e=ed: self._on_mod_changed(e, mod)
         )
         ed.document().contentsChanged.connect(self._update_status)
-        ed.document().contentsChanged.connect(self._schedule_preview)
+        ed.document().contentsChanged.connect(self._do_preview_update)
         return ed
 
     def _tab_title(self, editor: CodeEditor) -> str:
@@ -2717,8 +2808,8 @@ class NaroEditor(QMainWindow):
                 self._dock_pane.sync_theme()
                 self._dock_pane.show()
                 sizes = self._main_splitter.sizes()
-                vw = _THEMES.get(self._dock_pane.theme_id, _THEMES["narou"])["view_width"]
-                want = vw + 40
+                content_w = _THEMES.get(self._dock_pane.theme_id, _THEMES["narou"])["content_w"]
+                want = content_w + 80
                 total = sizes[0] + sizes[1] + sizes[2]
                 self._main_splitter.setSizes([sizes[0], total - sizes[0] - want, want])
                 self._do_preview_update()
@@ -2760,14 +2851,6 @@ class NaroEditor(QMainWindow):
         if was_open:
             self._toggle_preview()
 
-    def _schedule_preview(self) -> None:
-        active = (
-            (self._preview_mode == "float" and self._preview is not None)
-            or (self._preview_mode == "dock" and self._dock_pane.isVisible())
-        )
-        if active:
-            self._prev_timer.start()
-
     def _do_preview_update(self) -> None:
         if self._preview_mode == "dock":
             target = self._dock_pane if self._dock_pane.isVisible() else None
@@ -2783,7 +2866,7 @@ class NaroEditor(QMainWindow):
                 title = os.path.splitext(os.path.basename(cur.file_path))[0]
             else:
                 title = "新規ファイル"
-        target.set_content(_build_preview_html(text, title, target.theme_id))
+        target.set_content(text, title)
 
     # ------------------------------------------------------------------
     # Search / Replace
@@ -3307,13 +3390,9 @@ class NaroEditor(QMainWindow):
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Use ANGLE/DirectX instead of native OpenGL for all Qt and Chromium
-    # rendering.  Native OpenGL (GLES) context creation fails on many
-    # Windows systems with certain GPU/driver combinations, producing
-    # kFatalFailure errors.  ANGLE translates GL calls to D3D11 and is
-    # always available on Windows regardless of OpenGL driver state.
+    # ANGLE/DirectX を使用することで、OpenGL ドライバーが不安定な環境でも
+    # Qt のレンダリングを安定させる。
     os.environ.setdefault("QT_OPENGL", "angle")
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--use-angle=d3d11")
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
