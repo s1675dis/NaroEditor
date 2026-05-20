@@ -105,6 +105,8 @@
   - C# アップデータ側でも `UseShellExecute=false` + `_MEIPASS2` 削除を追加（二重防衛）
 - **バグ修正**: 別ユーザー環境での起動時に `Could not create temporary directory!` エラーが発生する問題を修正
   - `runtime_tmpdir` にハードコードされたユーザー固有パスを指定していたため削除。PyInstaller がシステムの `%TEMP%` を自動使用するよう変更
+- **バグ修正**: Windows ダークモード環境でプレビューの背景が黒くなる問題を修正
+  - `QPalette.Base` ロールを各テーマの背景色で明示設定し、システムテーマに依存しないよう変更
 
 ### v1.2.7
 
