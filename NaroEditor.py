@@ -2223,7 +2223,8 @@ class NaroEditor(QMainWindow):
         self.setWindowTitle("NaroEditor")
         self.resize(1200, 760)
         self.setMinimumSize(640, 480)
-        _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NaroEditor.ico")
+        _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        _ico = os.path.join(_base, "NaroEditor.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
         cfg = _load_cfg()
@@ -3743,6 +3744,13 @@ if __name__ == "__main__":
     # ANGLE/DirectX を使用することで、OpenGL ドライバーが不安定な環境でも
     # Qt のレンダリングを安定させる。
     os.environ.setdefault("QT_OPENGL", "angle")
+
+    # Windows タスクバー・タイトルバーに exe のアイコンを表示させるため
+    # AppUserModelID を設定する（python.exe としてグループ化されるのを防ぐ）
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NaroEditor")
+    except Exception:
+        pass
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
