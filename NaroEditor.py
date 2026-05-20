@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # ---------------------------------------------------------------------------
@@ -3433,11 +3433,21 @@ class NaroEditor(QMainWindow):
 
     def _apply_update(self, new_exe_path: str) -> None:
         current_exe = sys.executable
+        # sys._MEIPASS = "...\NaroEditor\_MEI<N>" → parent is runtime_tmpdir
+        meipass = getattr(sys, "_MEIPASS", "")
+        runtime_dir = os.path.dirname(meipass) if meipass else ""
         import tempfile
         bat_path = os.path.join(tempfile.gettempdir(), "NaroEditor_update.bat")
+        # Delete all _MEI* extraction folders so the new EXE starts with a clean slate.
+        # Without this, the new EXE may collide with the old _MEI folder and fail to load DLLs.
+        if runtime_dir:
+            cleanup = f'for /d %%d in ("{runtime_dir}\\_MEI*") do rd /s /q "%%d" 2>nul\r\n'
+        else:
+            cleanup = ""
         bat = (
             "@echo off\r\n"
-            "ping -n 4 127.0.0.1 > nul\r\n"
+            "ping -n 6 127.0.0.1 > nul\r\n"  # ~5s wait for process exit and DLL unlock
+            f"{cleanup}"
             f"move /y \"{new_exe_path}\" \"{current_exe}\"\r\n"
             f"start \"\" \"{current_exe}\"\r\n"
             "(goto) 2>nul & del \"%~f0\"\r\n"
