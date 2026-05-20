@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette
