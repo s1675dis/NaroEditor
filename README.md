@@ -94,6 +94,12 @@
 
 ## 変更履歴
 
+### v1.2.6
+
+- **バグ修正**: NaroEditorUpdater.exe が Windows Defender にウィルスとして誤検知される問題を修正
+  - アップデータを PyInstaller（Python）から .NET Framework 4.x C# に書き直し、実行ファイルサイズを 12MB → 61KB に削減
+  - ネットワーク処理（EXE ダウンロード）を NaroEditor 本体側に移管し、アップデータはファイル置換と再起動のみを担当するシンプルな実装に変更
+
 ### v1.2.5
 
 - **アップデート機構を刷新**: NaroEditor.exe 内部でダウンロード・置換を行う方式から、独立したアップデータプロセス（NaroEditorUpdater.exe）を起動する方式に変更

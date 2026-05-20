@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QFileDialog, QMessageBox, QFrame, QTreeView, QTabWidget, QTabBar,
     QTextBrowser, QComboBox, QInputDialog, QMenu,
-    QGraphicsView, QGraphicsScene,
+    QGraphicsView, QGraphicsScene, QProgressDialog,
 )
 from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF, QThread
 from PyQt6.QtGui import QTransform
@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -2501,6 +2501,45 @@ class _UpdateChecker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Auto-update: download thread
+# ---------------------------------------------------------------------------
+class _DownloadThread(QThread):
+    """新バージョン EXE を一時ファイルにダウンロードする。"""
+    progress = pyqtSignal(int)   # 0-100
+    finished = pyqtSignal(str)   # 一時ファイルパス
+    error    = pyqtSignal(str)   # エラーメッセージ
+
+    def __init__(self, url: str, dest: str, parent=None):
+        super().__init__(parent)
+        self._url  = url
+        self._dest = dest
+
+    def run(self) -> None:
+        try:
+            import urllib.request as _ur
+            req = _ur.Request(self._url, headers={"User-Agent": f"NaroEditor/{APP_VERSION}"})
+            with _ur.urlopen(req, timeout=120) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                done  = 0
+                with open(self._dest, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total > 0:
+                            self.progress.emit(int(done * 100 / total))
+            # MZ ヘッダー検証
+            with open(self._dest, "rb") as f:
+                if f.read(2) != b"MZ":
+                    raise ValueError("ダウンロードしたファイルが無効です。")
+            self.finished.emit(self._dest)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class NaroEditor(QMainWindow):
@@ -3363,11 +3402,9 @@ class NaroEditor(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
-        if ret == QMessageBox.StandardButton.Yes:
-            self._launch_updater(version, url)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
 
-    def _launch_updater(self, version: str, url: str) -> None:
-        """NaroEditorUpdater.exe を起動して自身は終了する。"""
         if not os.path.isfile(_UPDATER_PATH):
             QMessageBox.warning(
                 self, "アップデート",
@@ -3375,11 +3412,47 @@ class NaroEditor(QMainWindow):
                 f"{_UPDATER_DIR} に NaroEditorUpdater.exe を配置してください。",
             )
             return
+
+        import tempfile
+        tmp = os.path.join(tempfile.gettempdir(), f"NaroEditor_{version}_new.exe")
+
+        dlg = QProgressDialog(
+            f"NaroEditor v{version} をダウンロード中…",
+            None,   # キャンセルボタンなし
+            0, 100, self,
+        )
+        dlg.setWindowTitle("アップデート")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setValue(0)
+
+        self._dl_thread = _DownloadThread(url, tmp, self)
+
+        def _on_progress(v: int) -> None:
+            dlg.setValue(v)
+
+        def _on_finished(path: str) -> None:
+            dlg.close()
+            self._launch_updater(version, path)
+
+        def _on_error(msg: str) -> None:
+            dlg.close()
+            QMessageBox.critical(self, "アップデート", f"ダウンロードに失敗しました。\n{msg}")
+
+        self._dl_thread.progress.connect(_on_progress)
+        self._dl_thread.finished.connect(_on_finished)
+        self._dl_thread.error.connect(_on_error)
+        self._dl_thread.start()
+        dlg.exec()
+
+    def _launch_updater(self, version: str, source: str) -> None:
+        """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
         import subprocess
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),
-             "--url",     url,
+             "--source",  source,
              "--target",  sys.executable,
              "--version", version],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
