@@ -612,7 +612,12 @@ class SearchReplaceDialog(QDialog):
         content = self._editor.toPlainText()
         new_content, count = pat.subn(self._unescape(self._replace.text()), content)
         if count:
-            self._editor.setPlainText(new_content)
+            cursor = self._editor.textCursor()
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.insertText(new_content)
+            cursor.endEditBlock()
+            self._editor.setTextCursor(cursor)
         self._set_status(
             f"{count} 件置換しました" if count else "対象が見つかりませんでした",
             ok=bool(count),
@@ -1445,39 +1450,92 @@ class PreviewBrowser(QTextBrowser):
         self.document().documentLayout().registerHandler(
             _RUBY_OBJ_TYPE, self._ruby_obj)
 
-        self._rubies: list[tuple[int, str, str]] = []
+        # ルビ位置をブロック番号 + ブロック内オフセットで管理
+        # (block_num, pos_in_block, base, reading)
+        self._rubies: list[tuple[int, int, str, str]] = []
+        # 差分更新用キャッシュ
+        self._line_cache: list[str] = []
+        self._title_cache: str = ""
+        self._body_block: QTextBlockFormat | None = None
+        self._body_char: QTextCharFormat | None = None
 
     def set_theme(self, theme_id: str) -> None:
         self._theme = _THEMES.get(theme_id, _THEMES["narou"])
         self._ruby_obj.nudge = self._theme.get("ruby_nudge", 3)
         self.setMinimumWidth(_PREVIEW_MIN_W)
+        # テーマ変更時は次回更新で全再構築させる
+        self._body_block = None
+        self._line_cache = []
+        self._title_cache = ""
 
-    def update_preview(self, body: str, title: str = "") -> None:
+    def _make_body_formats(self) -> tuple[QTextBlockFormat, QTextCharFormat, QFont]:
         th = self._theme
-
-        pal = self.palette()
-        pal.setColor(QPalette.ColorRole.Text, QColor(th["fg"]))
-        self.setPalette(pal)
-
         body_font = QFont(th["font_qt"])
         body_font.setPixelSize(round(th["font_px"]))
         body_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-        doc = self.document()
-        doc.setDefaultFont(body_font)
-
-        doc.clear()
-        self._rubies.clear()
-        cursor = QTextCursor(doc)
-
         body_char = QTextCharFormat()
         body_char.setFont(body_font)
         body_char.setForeground(QColor(th["fg"]))
-
         body_block = QTextBlockFormat()
         body_block.setTopMargin(0)
         body_block.setBottomMargin(0)
         # FixedHeight (type=2): CSS line-height と同じ計算（font_px × line_height px）
         body_block.setLineHeight(round(th["font_px"] * th["line_height"]), 2)
+        return body_block, body_char, body_font
+
+    def _update_line(self, line_idx: int, new_line: str) -> None:
+        """変更された1行だけをプレビュードキュメント内で差し替える。"""
+        title_offset = 1 if self._title_cache.strip() else 0
+        block_num = line_idx + title_offset
+        doc = self.document()
+        block = doc.findBlockByNumber(block_num)
+        if not block.isValid():
+            return
+        # この行のルビだけ除去し、再挿入で補完する
+        self._rubies = [r for r in self._rubies if r[0] != block_num]
+        cursor = QTextCursor(block)
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                            QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.setBlockFormat(self._body_block)
+        cursor.setCharFormat(self._body_char)
+        self._insert_line(cursor, new_line, self._body_char)
+        cursor.endEditBlock()
+
+    def update_preview(self, body: str, title: str = "") -> None:
+        new_lines = body.split("\n")
+
+        # ── 差分更新パス ─────────────────────────────────────────────
+        # 行数が同じ・タイトル不変・フォーマット準備済みの場合のみ適用
+        if (self._body_block is not None
+                and title == self._title_cache
+                and len(new_lines) == len(self._line_cache)):
+            changed = [i for i, (a, b) in enumerate(zip(self._line_cache, new_lines)) if a != b]
+            if not changed:
+                return
+            if len(changed) <= 10:
+                for i in changed:
+                    self._update_line(i, new_lines[i])
+                self._line_cache = list(new_lines)
+                return
+
+        # ── 全再構築パス ─────────────────────────────────────────────
+        th = self._theme
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Text, QColor(th["fg"]))
+        self.setPalette(pal)
+
+        body_block, body_char, body_font = self._make_body_formats()
+        self._body_block = body_block
+        self._body_char  = body_char
+
+        doc = self.document()
+        doc.setDefaultFont(body_font)
+        doc.clear()
+        self._rubies.clear()
+        cursor = QTextCursor(doc)
 
         if title.strip():
             t_font = QFont(th["font_qt"])
@@ -1506,15 +1564,16 @@ class PreviewBrowser(QTextBrowser):
             cursor.insertText(title.strip())
             cursor.insertBlock(body_block, body_char)
 
-        lines = body.split("\n")
         first = True
-        for line in lines:
+        for line in new_lines:
             if not first:
                 cursor.insertBlock(body_block, body_char)
             first = False
             cursor.setBlockFormat(body_block)
             self._insert_line(cursor, line, body_char)
 
+        self._line_cache  = list(new_lines)
+        self._title_cache = title
         self._apply_margins()
 
     def _insert_line(self, cursor: QTextCursor,
@@ -1577,7 +1636,8 @@ class PreviewBrowser(QTextBrowser):
     def _insert_ruby(self, cursor: QTextCursor,
                      base: str, reading: str,
                      base_fmt: QTextCharFormat) -> None:
-        self._rubies.append((cursor.position(), base, reading))
+        # \u30D6\u30ED\u30C3\u30AF\u756A\u53F7 + \u30D6\u30ED\u30C3\u30AF\u5185\u30AA\u30D5\u30BB\u30C3\u30C8\u3067\u8A18\u9332\uFF08\u4ED6\u30D6\u30ED\u30C3\u30AF\u7DE8\u96C6\u306E\u5F71\u97FF\u3092\u53D7\u3051\u306A\u3044\uFF09
+        self._rubies.append((cursor.blockNumber(), cursor.positionInBlock(), base, reading))
         fmt = QTextCharFormat(base_fmt)
         fmt.setObjectType(_RUBY_OBJ_TYPE)
         fmt.setProperty(_PROP_BASE,    base)
@@ -1613,14 +1673,13 @@ class PreviewBrowser(QTextBrowser):
         painter.setFont(rt_font)
         painter.setPen(self.palette().color(QPalette.ColorRole.Text))
 
-        for doc_pos, base, reading in self._rubies:
-            block = doc.findBlock(doc_pos)
+        for block_num, pos_in_block, base, reading in self._rubies:
+            block = doc.findBlockByNumber(block_num)
             if not block.isValid():
                 continue
             layout = block.layout()
             if layout is None:
                 continue
-            pos_in_block = doc_pos - block.position()
             line = layout.lineForTextPosition(pos_in_block)
             if not line.isValid():
                 continue
@@ -1691,7 +1750,12 @@ class _PreviewScaleView(QGraphicsView):
     # Delegate PreviewBrowser API
     # ------------------------------------------------------------------
     def update_preview(self, body: str, title: str = "") -> None:
-        self._browser.update_preview(body, title)
+        layout = self._browser.document().documentLayout()
+        layout.blockSignals(True)
+        try:
+            self._browser.update_preview(body, title)
+        finally:
+            layout.blockSignals(False)
         self._sync_scene_rect()
 
     def set_theme(self, theme_id: str) -> None:
@@ -2247,6 +2311,10 @@ class NaroEditor(QMainWindow):
         self._autosave_timer.setInterval(30_000)
         self._autosave_timer.timeout.connect(self._do_autosave)
         self._autosave_timer.start()
+        self._preview_update_timer = QTimer(self)
+        self._preview_update_timer.setSingleShot(True)
+        self._preview_update_timer.setInterval(300)
+        self._preview_update_timer.timeout.connect(self._do_preview_update)
         # クラッシュ判定はロックファイル作成より前に行う
         self._prev_crashed = os.path.isfile(_LOCK_PATH)
         try:
@@ -2736,7 +2804,7 @@ class NaroEditor(QMainWindow):
             lambda mod, e=ed: self._on_mod_changed(e, mod)
         )
         ed.document().contentsChanged.connect(self._update_status)
-        ed.document().contentsChanged.connect(self._do_preview_update)
+        ed.document().contentsChanged.connect(self._preview_update_timer.start)
         return ed
 
     def _tab_title(self, editor: CodeEditor) -> str:
@@ -2845,7 +2913,7 @@ class NaroEditor(QMainWindow):
                 ed = pane.widget(i)
                 if isinstance(ed, CodeEditor) and ed.file_path == old_path:
                     ed.file_path = new_path
-                    pane.setTabText(i, os.path.basename(new_path))
+                    pane.setTabText(i, self._tab_title(ed))
         self._update_window_title()
 
     def _open_path(self, path: str) -> None:
@@ -2914,9 +2982,13 @@ class NaroEditor(QMainWindow):
         )
         if not path:
             return
+        old_path = cur.file_path
         cur.file_path = path
         cur.file_encoding = "utf-8"
         self._write(cur, path)
+        if old_path:
+            self._lock_mgr.unlock(old_path)
+        self._lock_mgr.lock(path)
         idx = self._active_pane.currentIndex()
         self._active_pane.setTabText(idx, self._tab_title(cur))
         self._update_window_title()
@@ -2957,6 +3029,9 @@ class NaroEditor(QMainWindow):
                     return
                 if ans == QMessageBox.StandardButton.Save:
                     self._save_file()
+                    if isinstance(ed, CodeEditor) and ed.document().isModified():
+                        event.ignore()
+                        return
         # Save session state
         session_files = []
         for pane in self._panes:
@@ -3090,6 +3165,7 @@ class NaroEditor(QMainWindow):
                 ed.setPlainText(content)
                 ed.document().setModified(True)
                 title = os.path.basename(orig_path) + " [復元]"
+                self._lock_mgr.lock(orig_path)
             else:
                 ed.setPlainText(content)
                 ed.document().setModified(True)
@@ -3732,7 +3808,7 @@ class NaroEditor(QMainWindow):
             self._char_lbl.setText("文字数: 0")
             self._enc_lbl.setText("UTF-8")
             return
-        self._char_lbl.setText(f"文字数: {len(cur.toPlainText()):,}")
+        self._char_lbl.setText(f"文字数: {cur.document().characterCount() - 1:,}")
         enc = cur.file_encoding.upper().replace("_", "-")
         enc = enc.replace("UTF-8-SIG", "UTF-8 (BOM)").replace("CP932", "Shift-JIS")
         self._enc_lbl.setText(enc)
