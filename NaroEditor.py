@@ -1905,6 +1905,10 @@ class PreviewPane(QWidget):
     def set_dock_mode(self, docked: bool) -> None:
         self._dock_btn.setText("独立ウィンドウ" if docked else "ドッキング")
 
+    @property
+    def current_zoom_factor(self) -> float:
+        return _PreviewScaleView._SCALE_OPTIONS[self._zoom_idx][1]
+
     def _on_theme_changed(self, index: int) -> None:
         self._theme_id = self._theme_combo.itemData(index)
         cfg = _load_cfg()
@@ -2041,6 +2045,10 @@ class PreviewWindow(QWidget):
     @property
     def theme_id(self) -> str:
         return self._pane.theme_id
+
+    @property
+    def current_zoom_factor(self) -> float:
+        return self._pane.current_zoom_factor
 
     def set_content(self, body: str, title: str = "") -> None:
         self._pane.set_content(body, title)
@@ -2688,7 +2696,11 @@ class NaroEditor(QMainWindow):
                     if from_pane is not self._panes[0]:
                         self._remove_pane(from_pane)
                     else:
+                        # pane[0] は常に生かす — from_pane に新規タブを追加する
+                        prev_active = self._active_pane
+                        self._active_pane = from_pane
                         self._new_tab()
+                        self._active_pane = prev_active
                 self._update_window_title()
                 self._update_status()
             return
@@ -2757,12 +2769,16 @@ class NaroEditor(QMainWindow):
                 return
             if ans == QMessageBox.StandardButton.Save:
                 self._save_file()
+                # Save As がキャンセルされた場合はタブを閉じない
+                if isinstance(ed, CodeEditor) and ed.document().isModified():
+                    return
 
         if isinstance(ed, CodeEditor):
             self._lock_mgr.unlock(ed.file_path)
         pane.removeTab(index)
         if pane.count() == 0:
             if pane is self._panes[0] or len(self._panes) == 1:
+                self._active_pane = pane
                 self._new_tab()
             else:
                 self._remove_pane(pane)
@@ -2973,9 +2989,10 @@ class NaroEditor(QMainWindow):
             if os.path.isfile(path):
                 self._open_path(path)
                 opened += 1
-        if opened == 0:
+        total_tabs = sum(p.count() for p in self._panes)
+        if total_tabs == 0:
             self._new_tab()
-        else:
+        elif opened > 0:
             target = min(active, self._active_pane.count() - 1)
             if target >= 0:
                 self._active_pane.setCurrentIndex(target)
@@ -3128,6 +3145,10 @@ class NaroEditor(QMainWindow):
                 self._preview.zoom_changed.connect(self._on_float_zoom_changed)
                 self._preview.show()
                 self._do_preview_update()
+                # 保存済みズーム倍率をウィンドウ幅に反映する
+                factor = self._preview.current_zoom_factor
+                if factor != 1.0:
+                    self._on_float_zoom_changed(factor)
             else:
                 self._preview.close()
 
@@ -3416,7 +3437,12 @@ class NaroEditor(QMainWindow):
             # selectedText() uses U+2029 (paragraph separator), not actual newlines
             cur.insertText(cur.selectedText().replace(" ", ""))
         else:
-            e.setPlainText(e.toPlainText().replace("\n", "").replace("\r", ""))
+            new_text = e.toPlainText().replace("\n", "").replace("\r", "")
+            cur2 = QTextCursor(e.document())
+            cur2.beginEditBlock()
+            cur2.select(QTextCursor.SelectionType.Document)
+            cur2.insertText(new_text)
+            cur2.endEditBlock()
 
     # 段落先頭でインデントをスキップする文字（日本語文法による）
     _PARA_SKIP = frozenset(
