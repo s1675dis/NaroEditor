@@ -419,6 +419,7 @@ _THEMES: dict[str, dict] = {
         "font_qt":      "Meiryo",
         "font_px":      16,
         "line_height":  1.8,
+        "bg":           "#ffffff",
         "fg":           "#444444",
         "title_px":     27.2,
         "title_weight": "bold",
@@ -435,6 +436,7 @@ _THEMES: dict[str, dict] = {
         "font_qt":      "游明朝",
         "font_px":      17.5,
         "line_height":  1.8,
+        "bg":           "#ffffff",
         "fg":           "#222222",
         "title_px":     26.25,
         "title_weight": "normal",
@@ -451,6 +453,7 @@ _THEMES: dict[str, dict] = {
         "font_qt":      "游明朝",
         "font_px":      16,
         "line_height":  1.75,
+        "bg":           "#ffffff",
         "fg":           "#1f1f1f",
         "title_px":     24,
         "title_weight": "bold",
@@ -467,6 +470,7 @@ _THEMES: dict[str, dict] = {
         "font_qt":      "游ゴシック",
         "font_px":      16,
         "line_height":  1.75,
+        "bg":           "#ffffff",
         "fg":           "#1f1f1f",
         "title_px":     24,
         "title_weight": "bold",
@@ -483,6 +487,7 @@ _THEMES: dict[str, dict] = {
         "font_qt":      "Meiryo",
         "font_px":      16,
         "line_height":  36 / 16,
+        "bg":           "#ffffff",
         "fg":           "#202020",
         "title_px":     30,
         "title_weight": "bold",
@@ -1467,6 +1472,11 @@ class PreviewBrowser(QTextBrowser):
         self.setReadOnly(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
+        # システムテーマ（Windows ダークモード等）に依存しないよう背景色を固定する
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, QColor(self._theme["bg"]))
+        self.setPalette(pal)
+
         self._ruby_obj = RubyTextObject(self)
         self._ruby_obj.nudge = self._theme.get("ruby_nudge", 3)
         self.document().documentLayout().registerHandler(
@@ -1493,6 +1503,9 @@ class PreviewBrowser(QTextBrowser):
         self._theme = _THEMES.get(theme_id, _THEMES["narou"])
         self._ruby_obj.nudge = self._theme.get("ruby_nudge", 3)
         self.setMinimumWidth(_PREVIEW_MIN_W)
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, QColor(self._theme["bg"]))
+        self.setPalette(pal)
         # テーマ変更時は次回更新で全再構築させる
         self._body_block = None
         self._line_cache = []
@@ -1561,6 +1574,7 @@ class PreviewBrowser(QTextBrowser):
         # ── 全再構築パス（行数変化・タイトル変化・初回）──────────────────────
         th = self._theme
         pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, QColor(th["bg"]))
         pal.setColor(QPalette.ColorRole.Text, QColor(th["fg"]))
         self.setPalette(pal)
 
@@ -1873,7 +1887,7 @@ class _PreviewScaleView(QGraphicsView):
 
     def set_theme(self, theme_id: str) -> None:
         self._browser.set_theme(theme_id)
-        bg = self._browser.palette().color(self._browser.backgroundRole())
+        bg = self._browser.palette().color(QPalette.ColorRole.Base)
         self.setBackgroundBrush(bg)
         self._sync_scene_rect()
 
