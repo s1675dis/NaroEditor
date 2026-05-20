@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # ---------------------------------------------------------------------------
@@ -3433,30 +3433,40 @@ class NaroEditor(QMainWindow):
 
     def _apply_update(self, new_exe_path: str) -> None:
         current_exe = sys.executable
-        # sys._MEIPASS = "...\NaroEditor\_MEI<N>" → parent is runtime_tmpdir
+        # sys._MEIPASS = "...\NaroEditor\_MEI<PID>" → parent is runtime_tmpdir
         meipass = getattr(sys, "_MEIPASS", "")
         runtime_dir = os.path.dirname(meipass) if meipass else ""
-        import tempfile
-        bat_path = os.path.join(tempfile.gettempdir(), "NaroEditor_update.bat")
-        # Delete all _MEI* extraction folders so the new EXE starts with a clean slate.
-        # Without this, the new EXE may collide with the old _MEI folder and fail to load DLLs.
-        if runtime_dir:
-            cleanup = f'for /d %%d in ("{runtime_dir}\\_MEI*") do rd /s /q "%%d" 2>nul\r\n'
-        else:
-            cleanup = ""
-        bat = (
-            "@echo off\r\n"
-            "ping -n 6 127.0.0.1 > nul\r\n"  # ~5s wait for process exit and DLL unlock
-            f"{cleanup}"
-            f"move /y \"{new_exe_path}\" \"{current_exe}\"\r\n"
-            f"start \"\" \"{current_exe}\"\r\n"
-            "(goto) 2>nul & del \"%~f0\"\r\n"
+        import tempfile, subprocess
+        ps_path = os.path.join(tempfile.gettempdir(), "NaroEditor_update.ps1")
+
+        mei_cleanup = (
+            f'Get-ChildItem -LiteralPath "{runtime_dir}" -Filter "_MEI*"'
+            f' -Directory -ErrorAction SilentlyContinue'
+            f' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\n'
+        ) if runtime_dir else ""
+
+        # PowerShell script:
+        #   1. Wait for the old process to exit and release all DLL locks
+        #   2. Unblock-File: remove Zone.Identifier (Mark of the Web) so LoadLibrary isn't blocked
+        #   3. Remove-Item Env:_MEIPASS2: PyInstaller frozen EXEs inherit _MEIPASS2 pointing to
+        #      the OLD extraction folder. Clearing it forces the new EXE to create a fresh _MEI*.
+        #   4. Delete leftover _MEI* folders so the new EXE starts with a clean extraction
+        #   5. Move new EXE into place
+        #   6. Start-Process: launch in a new, clean process context
+        ps = (
+            "Start-Sleep -Seconds 8\n"
+            f'Unblock-File -LiteralPath "{new_exe_path}" -ErrorAction SilentlyContinue\n'
+            "Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue\n"
+            f"{mei_cleanup}"
+            f'Move-Item -LiteralPath "{new_exe_path}" -Destination "{current_exe}" -Force\n'
+            f'Start-Process -FilePath "{current_exe}"\n'
+            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
         )
-        with open(bat_path, "w", encoding="mbcs") as f:
-            f.write(bat)
-        import subprocess
+        with open(ps_path, "w", encoding="utf-8-sig") as f:
+            f.write(ps)
         subprocess.Popen(
-            ["cmd.exe", "/c", bat_path],
+            ["powershell.exe", "-NonInteractive", "-WindowStyle", "Hidden",
+             "-ExecutionPolicy", "Bypass", "-File", ps_path],
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         QApplication.instance().quit()
