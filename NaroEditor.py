@@ -21,8 +21,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QFileDialog, QMessageBox, QFrame, QTreeView, QTabWidget, QTabBar,
     QTextBrowser, QComboBox, QInputDialog, QMenu,
+    QGraphicsView, QGraphicsScene,
 )
-from PyQt6.QtCore import Qt, QRect, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF
+from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF
+from PyQt6.QtGui import QTransform
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QFontMetricsF, QPainter, QColor, QTextCursor, QKeySequence,
     QTextOption, QStandardItemModel, QStandardItem,
@@ -31,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette
@@ -225,6 +227,11 @@ _CONFIG_PATH = os.path.join(_APP_DIR, "config.json")
 # （2回目以降の起動で PyInstaller がここを再利用し高速化される）
 _LOCAL_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", _APP_DIR), "NaroEditor")
 os.makedirs(_LOCAL_APP_DIR, exist_ok=True)
+
+# クラッシュリカバリー用パス
+_RECOVERY_DIR  = os.path.join(_APP_DIR, "recovery")
+_LOCK_PATH     = os.path.join(_APP_DIR, "session.lock")
+os.makedirs(_RECOVERY_DIR, exist_ok=True)
 
 
 def _load_cfg() -> dict:
@@ -1636,6 +1643,102 @@ class PreviewBrowser(QTextBrowser):
 
 
 # ---------------------------------------------------------------------------
+# _PreviewScaleView — QGraphicsView wrapper that visually scales PreviewBrowser
+# without changing any font or document settings.
+# ---------------------------------------------------------------------------
+class _PreviewScaleView(QGraphicsView):
+    """
+    PreviewBrowser を QGraphicsScene にのせ、setTransform() でスケーリングする。
+    フォントサイズ・テーマ設定は一切変更せず、描画のみを拡大縮小する。
+    """
+
+    _SCALE_OPTIONS: list[tuple[str, float]] = [
+        ("100%", 1.00),
+        ("75%",  0.75),
+        ("50%",  0.50),
+        ("25%",  0.25),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scale = 1.0
+
+        self._browser = PreviewBrowser()
+        # 常に自然幅で描画させる。スクロールバーはView側に任せる
+        self._browser.setFixedWidth(_PREVIEW_MIN_W)
+        self._browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        scene = QGraphicsScene(self)
+        self.setScene(scene)
+        self._proxy = scene.addWidget(self._browser)
+
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.setBackgroundBrush(self._browser.palette().base())
+
+        self._browser.document().documentLayout().documentSizeChanged.connect(
+            self._sync_scene_rect
+        )
+
+    @property
+    def browser(self) -> PreviewBrowser:
+        return self._browser
+
+    # ------------------------------------------------------------------
+    # Delegate PreviewBrowser API
+    # ------------------------------------------------------------------
+    def update_preview(self, body: str, title: str = "") -> None:
+        self._browser.update_preview(body, title)
+        self._sync_scene_rect()
+
+    def set_theme(self, theme_id: str) -> None:
+        self._browser.set_theme(theme_id)
+        bg = self._browser.palette().color(self._browser.backgroundRole())
+        self.setBackgroundBrush(bg)
+        self._sync_scene_rect()
+
+    # ------------------------------------------------------------------
+    # Scale
+    # ------------------------------------------------------------------
+    def set_scale(self, factor: float) -> None:
+        self._scale = factor
+        t = QTransform()
+        t.scale(factor, factor)
+        self.setTransform(t)
+        self.updateGeometry()   # レイアウトに最小サイズの再評価を通知
+        self._sync_scene_rect()
+
+    @property
+    def scale_factor(self) -> float:
+        return self._scale
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(max(200, round(_PREVIEW_MIN_W * self._scale)), 200)
+
+    def sizeHint(self) -> QSize:
+        return QSize(round(_PREVIEW_MIN_W * self._scale), 600)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+    def _sync_scene_rect(self) -> None:
+        """ブラウザの文書高さに合わせてシーンサイズを更新する。"""
+        doc_h = self._browser.document().size().height()
+        # ビューポートが文書より大きい場合でも余白がつぶれないよう確保
+        min_h = self.viewport().height() / self._scale if self._scale > 0 else doc_h
+        h = max(doc_h + 40, min_h)
+        self._browser.setFixedHeight(int(h))
+        self.setSceneRect(QRectF(0, 0, _PREVIEW_MIN_W, h))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_scene_rect()
+
+
+# ---------------------------------------------------------------------------
 # Preview panel (embeddable widget — toolbar + viewer + autoscroll)
 # ---------------------------------------------------------------------------
 class PreviewPane(QWidget):
@@ -1644,11 +1747,14 @@ class PreviewPane(QWidget):
     closed        = pyqtSignal()
     theme_changed = pyqtSignal()
     dock_toggled  = pyqtSignal()
+    zoom_changed  = pyqtSignal(float)   # フロート/ドック共通のズーム変更通知
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._theme_id = _load_cfg().get("preview_theme", "narou")
+        _cfg = _load_cfg()
+        self._theme_id = _cfg.get("preview_theme", "narou")
+        self._zoom_idx_init = _cfg.get("preview_zoom_idx", 0)
 
         self._autoscroll_active = False
         self._autoscroll_anchor = QPoint()
@@ -1690,6 +1796,7 @@ class PreviewPane(QWidget):
         self.setStyleSheet("""
             QWidget          { color: #333; }
             #previewToolbar  { background: #f0f0f0; border-bottom: 1px solid #d0d0d0; }
+            #previewFooter   { background: #f0f0f0; border-top:    1px solid #d0d0d0; }
             QLabel           { color: #333; background: transparent; }
             QComboBox {
                 background: #fff; border: 1px solid #bbb; border-radius: 3px;
@@ -1704,6 +1811,14 @@ class PreviewPane(QWidget):
                 padding: 0 10px; height: 24px; font-size: 11px; color: #555;
             }
             QPushButton#dockBtn:hover { background: #d8d8d8; }
+            QPushButton#zoomBtn {
+                background: #e8e8e8; border: 1px solid #bbb; border-radius: 3px;
+                width: 24px; height: 24px; font-size: 14px; color: #444; padding: 0;
+            }
+            QPushButton#zoomBtn:hover   { background: #d0d0d0; }
+            QPushButton#zoomBtn:pressed { background: #b8b8b8; }
+            QPushButton#zoomBtn:disabled { color: #bbb; background: #ebebeb; border-color: #d0d0d0; }
+            QLabel#zoomLabel { font-size: 12px; color: #555; min-width: 42px; }
             QScrollBar:vertical {
                 background: #f0f0f0; width: 12px; border: none; margin: 0;
             }
@@ -1714,6 +1829,7 @@ class PreviewPane(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """)
 
+        # ── 上部ツールバー ──────────────────────────────────────────────
         toolbar = QWidget()
         toolbar.setObjectName("previewToolbar")
         toolbar.setFixedHeight(38)
@@ -1740,14 +1856,51 @@ class PreviewPane(QWidget):
         self._dock_btn.clicked.connect(self.dock_toggled)
         tl.addWidget(self._dock_btn)
 
-        self._view = PreviewBrowser()
+        # ── プレビュー本体 ──────────────────────────────────────────────
+        self._view = _PreviewScaleView()
         self._view.set_theme(self._theme_id)
 
+        # ── 下部ズームバー ──────────────────────────────────────────────
+        n = len(_PreviewScaleView._SCALE_OPTIONS)
+        self._zoom_idx = max(0, min(self._zoom_idx_init, n - 1))
+
+        footer = QWidget()
+        footer.setObjectName("previewFooter")
+        footer.setFixedHeight(32)
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(10, 0, 10, 0)
+        fl.setSpacing(4)
+        fl.addStretch()
+
+        self._zoom_out_btn = QPushButton("−")
+        self._zoom_out_btn.setObjectName("zoomBtn")
+        self._zoom_out_btn.setFixedSize(24, 24)
+        self._zoom_out_btn.clicked.connect(self._zoom_out)
+        fl.addWidget(self._zoom_out_btn)
+
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setObjectName("zoomLabel")
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fl.addWidget(self._zoom_label)
+
+        self._zoom_in_btn = QPushButton("+")
+        self._zoom_in_btn.setObjectName("zoomBtn")
+        self._zoom_in_btn.setFixedSize(24, 24)
+        self._zoom_in_btn.clicked.connect(self._zoom_in)
+        fl.addWidget(self._zoom_in_btn)
+
+        self._update_zoom_ui()
+        if self._zoom_idx != 0:
+            _, factor = _PreviewScaleView._SCALE_OPTIONS[self._zoom_idx]
+            self._view.set_scale(factor)
+
+        # ── レイアウト ──────────────────────────────────────────────────
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(toolbar)
         outer.addWidget(self._view, 1)
+        outer.addWidget(footer)
 
     def set_dock_mode(self, docked: bool) -> None:
         self._dock_btn.setText("独立ウィンドウ" if docked else "ドッキング")
@@ -1759,6 +1912,32 @@ class PreviewPane(QWidget):
         _save_cfg(cfg)
         self._view.set_theme(self._theme_id)
         self.theme_changed.emit()
+
+    def _zoom_in(self) -> None:
+        if self._zoom_idx > 0:
+            self._zoom_idx -= 1
+            self._apply_zoom()
+
+    def _zoom_out(self) -> None:
+        if self._zoom_idx < len(_PreviewScaleView._SCALE_OPTIONS) - 1:
+            self._zoom_idx += 1
+            self._apply_zoom()
+
+    def _apply_zoom(self) -> None:
+        _, factor = _PreviewScaleView._SCALE_OPTIONS[self._zoom_idx]
+        self._view.set_scale(factor)
+        self._update_zoom_ui()
+        cfg = _load_cfg()
+        cfg["preview_zoom_idx"] = self._zoom_idx
+        _save_cfg(cfg)
+        self.zoom_changed.emit(factor)
+
+    def _update_zoom_ui(self) -> None:
+        opts = _PreviewScaleView._SCALE_OPTIONS
+        label, _ = opts[self._zoom_idx]
+        self._zoom_label.setText(label)
+        self._zoom_in_btn.setEnabled(self._zoom_idx > 0)
+        self._zoom_out_btn.setEnabled(self._zoom_idx < len(opts) - 1)
 
     # ------------------------------------------------------------------
     # Event filter lifecycle (install on show, remove on hide/close)
@@ -1841,12 +2020,14 @@ class PreviewWindow(QWidget):
     closed        = pyqtSignal()
     theme_changed = pyqtSignal()
     dock_toggled  = pyqtSignal()
+    zoom_changed  = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
         self._pane = PreviewPane()
         self._pane.theme_changed.connect(self._on_pane_theme_changed)
         self._pane.dock_toggled.connect(self.dock_toggled)
+        self._pane.zoom_changed.connect(self.zoom_changed)
 
         self.setWindowTitle("プレビュー")
         self.resize(_PREVIEW_MIN_W, 900)
@@ -2054,6 +2235,17 @@ class NaroEditor(QMainWindow):
         self._lock_mgr = FileLockManager()
         self._build_ui()
         self._build_menu()
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(30_000)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self._autosave_timer.start()
+        # クラッシュ判定はロックファイル作成より前に行う
+        self._prev_crashed = os.path.isfile(_LOCK_PATH)
+        try:
+            with open(_LOCK_PATH, "w", encoding="utf-8") as _f:
+                _f.write("locked")
+        except OSError:
+            pass
         QTimer.singleShot(0, self._restore_session)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
@@ -2105,6 +2297,7 @@ class NaroEditor(QMainWindow):
         self._dock_pane.set_dock_mode(True)
         self._dock_pane.theme_changed.connect(self._do_preview_update)
         self._dock_pane.dock_toggled.connect(self._toggle_preview_mode)
+        self._dock_pane.zoom_changed.connect(self._on_dock_zoom_changed)
         self._dock_pane.hide()
         self._main_splitter.addWidget(self._dock_pane)
 
@@ -2764,9 +2957,13 @@ class NaroEditor(QMainWindow):
         cfg["window_geometry"] = bytes(self.saveGeometry()).hex()
         _save_cfg(cfg)
         self._lock_mgr.unlock_all()
+        self._clear_recovery()
         event.accept()
 
     def _restore_session(self) -> None:
+        if self._prev_crashed:
+            self._offer_recovery()
+
         cfg = _load_cfg()
         paths = cfg.get("session_files", [])
         active = cfg.get("session_active_tab", 0)
@@ -2796,6 +2993,115 @@ class NaroEditor(QMainWindow):
                 QTimer.singleShot(0, _open_dock)
 
     # ------------------------------------------------------------------
+    # Crash recovery
+    # ------------------------------------------------------------------
+    def _do_autosave(self) -> None:
+        """30秒ごとに全エディタ内容をリカバリーディレクトリへ書き出す。"""
+        idx = 0
+        for pane in self._panes:
+            for i in range(pane.count()):
+                ed = pane.widget(i)
+                if not isinstance(ed, CodeEditor):
+                    continue
+                content = ed.toPlainText()
+                if not content:
+                    continue
+                path = ed.file_path or ""
+                save_path = os.path.join(_RECOVERY_DIR, f"{idx:03d}.autosave")
+                try:
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        f.write(path + "\n")
+                        f.write(content)
+                except OSError:
+                    pass
+                idx += 1
+        # 今回のタブ数より多い古いファイルを削除
+        for entry in os.scandir(_RECOVERY_DIR):
+            if not entry.name.endswith(".autosave"):
+                continue
+            try:
+                n = int(entry.name.replace(".autosave", ""))
+            except ValueError:
+                continue
+            if n >= idx:
+                try:
+                    os.remove(entry.path)
+                except OSError:
+                    pass
+
+    def _offer_recovery(self) -> None:
+        """前回クラッシュ時のリカバリーファイルを検出してユーザーに提示する。"""
+        entries = sorted(
+            [e for e in os.scandir(_RECOVERY_DIR) if e.name.endswith(".autosave")],
+            key=lambda e: e.name,
+        )
+        if not entries:
+            return
+
+        items: list[tuple[str, str]] = []   # (original_path_or_empty, content)
+        for entry in entries:
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
+                    first = f.readline().rstrip("\n")
+                    content = f.read()
+                items.append((first, content))
+            except OSError:
+                continue
+        if not items:
+            return
+
+        names = "\n".join(
+            f"  ・{os.path.basename(p) if p else '新規ファイル'}"
+            for p, _ in items
+        )
+        ans = QMessageBox.question(
+            self,
+            "クラッシュからの復元",
+            f"前回の終了時に保存されていないデータが見つかりました。\n\n"
+            f"{names}\n\n復元しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            self._clear_autosaves()
+            return
+
+        for orig_path, content in items:
+            ed = self._make_editor()
+            if orig_path and os.path.isfile(orig_path):
+                # 元ファイルが存在する場合は復元内容で上書き（未保存差分を復元）
+                ed.file_path = orig_path
+                ed.setPlainText(content)
+                ed.document().setModified(True)
+                title = os.path.basename(orig_path) + " [復元]"
+            else:
+                ed.setPlainText(content)
+                ed.document().setModified(True)
+                title = (os.path.basename(orig_path) if orig_path else "新規ファイル") + " [復元]"
+            idx = self._active_pane.addTab(ed, title)
+            self._active_pane.tabBar().setTabButton(
+                idx, QTabBar.ButtonPosition.RightSide, self._make_close_btn(ed)
+            )
+
+        self._clear_autosaves()
+
+    def _clear_autosaves(self) -> None:
+        """autosave ファイルのみ削除する（ロックは残す）。"""
+        try:
+            for entry in os.scandir(_RECOVERY_DIR):
+                if entry.name.endswith(".autosave"):
+                    os.remove(entry.path)
+        except OSError:
+            pass
+
+    def _clear_recovery(self) -> None:
+        """autosave ファイルとセッションロックを削除する（正常終了時に呼ぶ）。"""
+        self._clear_autosaves()
+        try:
+            os.remove(_LOCK_PATH)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     # Preview
     # ------------------------------------------------------------------
     def _toggle_preview(self) -> None:
@@ -2819,6 +3125,7 @@ class NaroEditor(QMainWindow):
                 self._preview.closed.connect(self._on_preview_closed)
                 self._preview.theme_changed.connect(self._do_preview_update)
                 self._preview.dock_toggled.connect(self._toggle_preview_mode)
+                self._preview.zoom_changed.connect(self._on_float_zoom_changed)
                 self._preview.show()
                 self._do_preview_update()
             else:
@@ -2826,6 +3133,23 @@ class NaroEditor(QMainWindow):
 
     def _on_preview_closed(self) -> None:
         self._preview = None
+
+    def _on_dock_zoom_changed(self, factor: float) -> None:
+        """ドックモードでズームが変わったらプレビューペインの幅を倍率に合わせる。"""
+        if not self._dock_pane.isVisible():
+            return
+        sizes = self._main_splitter.sizes()
+        new_w = max(200, round(_PREVIEW_MIN_W * factor))
+        total = sum(sizes)
+        self._main_splitter.setSizes([sizes[0], total - sizes[0] - new_w, new_w])
+
+    def _on_float_zoom_changed(self, factor: float) -> None:
+        """フロートモードでズームが変わったらウィンドウ幅を倍率に合わせる。"""
+        if self._preview is None:
+            return
+        new_w = max(280, round(_PREVIEW_MIN_W * factor))
+        self._preview.setMinimumWidth(new_w)
+        self._preview.resize(new_w, self._preview.height())
 
     def _toggle_preview_mode(self) -> None:
         was_open = (
