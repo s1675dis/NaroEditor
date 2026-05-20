@@ -170,8 +170,17 @@ namespace NaroEditorUpdater
                 SetStatus("再起動中…", 100);
                 Thread.Sleep(500);
 
-                // 3. Launch updated NaroEditor
-                Process.Start(new ProcessStartInfo(_target) { UseShellExecute = true });
+                // 3. Launch updated NaroEditor without PyInstaller env vars.
+                // UseShellExecute=false so we can strip _MEIPASS2, which would otherwise
+                // cause the new process to reuse the old _MEI* extraction folder.
+                var psi = new ProcessStartInfo(_target)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow  = false,
+                };
+                if (psi.EnvironmentVariables.ContainsKey("_MEIPASS2"))
+                    psi.EnvironmentVariables.Remove("_MEIPASS2");
+                Process.Start(psi);
 
                 Thread.Sleep(800);
                 BeginInvoke((Action)Close);
