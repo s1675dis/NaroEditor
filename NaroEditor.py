@@ -3448,6 +3448,9 @@ class NaroEditor(QMainWindow):
 
     def _launch_updater(self, version: str, source: str) -> None:
         """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
+        # PyInstaller が設定する _MEIPASS2 を子プロセスに引き継がせない。
+        # この env var が残ると新 NaroEditor.exe が旧 _MEI* フォルダを参照して DLL 読み込みに失敗する。
+        os.environ.pop("_MEIPASS2", None)
         import subprocess
         subprocess.Popen(
             [_UPDATER_PATH,
