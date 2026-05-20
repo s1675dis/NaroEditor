@@ -51,9 +51,7 @@ def _ensure_updater() -> None:
         return
     os.makedirs(_UPDATER_DIR, exist_ok=True)
     try:
-        if (os.path.isfile(_UPDATER_PATH)
-                and os.path.getsize(_UPDATER_PATH) == os.path.getsize(src)):
-            return  # 同サイズなら上書き不要
+        # サイズ比較は廃止。バージョンアップ時に古いアップデータが残らないよう常に上書き。
         import shutil as _shutil
         _shutil.copy2(src, _UPDATER_PATH)
     except OSError:
@@ -3448,10 +3446,14 @@ class NaroEditor(QMainWindow):
 
     def _launch_updater(self, version: str, source: str) -> None:
         """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
-        # PyInstaller は Win32 SetEnvironmentVariable で _MEIPASS2 を設定する。
-        # os.environ.pop では CRT 環境しか変更できず Win32 環境ブロックが残るため、
-        # env= に明示的な辞書を渡して _MEIPASS2 を除外する。
         import subprocess
+        # _MEIPASS2 を 3 段階で確実に除去する:
+        #   1. Win32 環境ブロック (SetEnvironmentVariableW) — PyInstaller が設定した本体
+        #   2. CRT 環境 (os.environ.pop) — Python が管理するコピー
+        #   3. Popen の env= 引数 — ブロック構築に使う辞書
+        # これにより新 NaroEditor.exe が旧 _MEI* フォルダを参照する問題を確実に防ぐ。
+        ctypes.windll.kernel32.SetEnvironmentVariableW("_MEIPASS2", None)
+        os.environ.pop("_MEIPASS2", None)
         env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
         subprocess.Popen(
             [_UPDATER_PATH,
