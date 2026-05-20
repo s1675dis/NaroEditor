@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.2.11"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -1939,6 +1939,15 @@ class _PreviewScaleView(QGraphicsView):
         super().resizeEvent(event)
         self._sync_scene_rect()
         self._trigger_render()
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        pixel = event.pixelDelta()
+        if not pixel.isNull():
+            bar.setValue(bar.value() - pixel.y())
+        else:
+            bar.setValue(bar.value() - event.angleDelta().y() // 2)
+        event.accept()
 
     # ------------------------------------------------------------------
     # Lazy rendering

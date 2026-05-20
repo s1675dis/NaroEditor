@@ -82,10 +82,14 @@ namespace NaroEditorUpdater
         private readonly ProgressBar _bar;
         private readonly int    _pid;
         private readonly string _source, _target, _version;
+        private readonly string _logPath;
 
         public UpdaterForm(int pid, string source, string target, string version)
         {
             _pid = pid; _source = source; _target = target; _version = version;
+            _logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "NaroEditor", "updater.log");
 
             Text            = "NaroEditor アップデート";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -114,6 +118,18 @@ namespace NaroEditorUpdater
             Load += (s, e) => new Thread(Worker) { IsBackground = true }.Start();
         }
 
+        void Log(string msg)
+        {
+            try
+            {
+                File.AppendAllText(
+                    _logPath,
+                    string.Format("[{0}] {1}\r\n", DateTime.Now.ToString("HH:mm:ss.fff"), msg),
+                    System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
+
         void SetStatus(string text, int progress)
         {
             if (InvokeRequired)
@@ -133,9 +149,15 @@ namespace NaroEditorUpdater
         {
             try
             {
+                Log("=== NaroEditorUpdater started, PID=" + Process.GetCurrentProcess().Id
+                    + ", target=" + _target);
+                Log("_MEIPASS2 at startup: "
+                    + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
+
                 // 1. Wait for NaroEditor to fully exit
                 if (_pid > 0)
                 {
+                    Log("Waiting for PID=" + _pid + " to exit...");
                     IntPtr h = OpenProcess(SYNCHRONIZE, false, _pid);
                     if (h != IntPtr.Zero)
                     {
@@ -146,22 +168,26 @@ namespace NaroEditorUpdater
                     {
                         Thread.Sleep(2000);
                     }
+                    Log("PID=" + _pid + " has exited.");
                 }
 
                 SetStatus(string.Format("NaroEditor v{0} を適用中…", _version), 50);
                 Thread.Sleep(300);
 
                 // 2. Replace target with downloaded file (retry for file locks)
+                Log("Replacing: " + _source + " -> " + _target);
                 for (int i = 0; i < 5; i++)
                 {
                     try
                     {
                         if (File.Exists(_target)) File.Delete(_target);
                         File.Move(_source, _target);
+                        Log("File replaced successfully on attempt " + (i + 1) + ".");
                         break;
                     }
-                    catch (IOException)
+                    catch (IOException ex)
                     {
+                        Log("Replace attempt " + (i + 1) + " failed: " + ex.Message);
                         if (i == 4) throw;
                         Thread.Sleep(2000);
                     }
@@ -171,22 +197,34 @@ namespace NaroEditorUpdater
                 Thread.Sleep(500);
 
                 // 3. Launch updated NaroEditor without PyInstaller env vars.
-                // UseShellExecute=false so we can strip _MEIPASS2, which would otherwise
-                // cause the new process to reuse the old _MEI* extraction folder.
-                var psi = new ProcessStartInfo(_target)
+                //
+                // Strategy: explicitly remove _MEIPASS2 from THIS process's Win32
+                // environment block via SetEnvironmentVariable, then start the new
+                // NaroEditor without passing an explicit environment (lpEnvironment=NULL),
+                // so it inherits THIS process's now-clean environment.  This is more
+                // reliable than manipulating ProcessStartInfo.EnvironmentVariables whose
+                // StringDictionary lowercases keys and may behave unexpectedly.
+                string meiVal = Environment.GetEnvironmentVariable("_MEIPASS2");
+                Log("_MEIPASS2 before launch: " + (meiVal ?? "(not set)"));
+                if (meiVal != null)
                 {
-                    UseShellExecute = false,
-                    CreateNoWindow  = false,
-                };
-                if (psi.EnvironmentVariables.ContainsKey("_MEIPASS2"))
-                    psi.EnvironmentVariables.Remove("_MEIPASS2");
-                Process.Start(psi);
+                    Environment.SetEnvironmentVariable("_MEIPASS2", null);
+                    Log("Cleared _MEIPASS2 from this process's environment.");
+                    Log("_MEIPASS2 after clear: "
+                        + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
+                }
+
+                Log("Calling Process.Start: " + _target);
+                Process.Start(new ProcessStartInfo(_target) { UseShellExecute = false });
+                Log("Process.Start returned successfully.");
 
                 Thread.Sleep(800);
                 BeginInvoke((Action)Close);
             }
             catch (Exception ex)
             {
+                Log("EXCEPTION: " + ex.GetType().Name + ": " + ex.Message
+                    + "\r\n" + ex.StackTrace);
                 SetStatus(string.Format("エラー: {0}", ex.Message), 0);
                 Thread.Sleep(8000);
                 BeginInvoke((Action)Close);

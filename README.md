@@ -94,6 +94,17 @@
 
 ## 変更履歴
 
+### v1.2.11
+
+- **バグ修正**: プレビュー画面でマウスホイールによるスクロールができなかった問題を修正
+  - `_PreviewScaleView`（`QGraphicsView`）に `wheelEvent` を実装。ホイールイベントが `QGraphicsProxyWidget` 経由で内部の `QTextBrowser` に到達・消費されスクロールバーが動かなかった問題を解消
+
+### v1.2.10
+
+- **バグ修正**: アップデート後の起動時に python DLL 読み込みが失敗する問題を修正
+  - C# アップデータが自身のプロセス環境から `_MEIPASS2` を `SetEnvironmentVariable` で明示的に削除するよう変更。これにより新 NaroEditor.exe が `CreateProcess` 経由でクリーンな環境を継承する
+  - アップデータの動作ログを `%APPDATA%\NaroEditor\updater.log` に出力するよう追加（問題調査用）
+
 ### v1.2.9
 
 - **テスト**: v1.2.8 アップデート機構の動作確認用リリース
