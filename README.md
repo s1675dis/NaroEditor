@@ -94,6 +94,13 @@
 
 ## 変更履歴
 
+### v1.2.5
+
+- **アップデート機構を刷新**: NaroEditor.exe 内部でダウンロード・置換を行う方式から、独立したアップデータプロセス（NaroEditorUpdater.exe）を起動する方式に変更
+  - 初回起動時に `%APPDATA%\NaroEditor\NaroEditorUpdater.exe` へ自動展開
+  - アップデート時は NaroEditor が PID・URL・保存先をアップデータに渡して終了。アップデータが NaroEditor の終了を確認してからダウンロード・置換・再起動を実行
+  - 異なるプロセスで動作するため PyInstaller の環境変数継承による DLL 読み込み失敗を根本解消
+
 ### v1.2.4
 
 - **バグ修正**: 自動アップデート後の再起動時に Python DLL 読み込みが失敗する問題を修正

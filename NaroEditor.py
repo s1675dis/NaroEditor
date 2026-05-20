@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QDialog, QLineEdit, QCheckBox, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QFileDialog, QMessageBox, QFrame, QTreeView, QTabWidget, QTabBar,
-    QTextBrowser, QComboBox, QInputDialog, QMenu, QProgressDialog,
+    QTextBrowser, QComboBox, QInputDialog, QMenu,
     QGraphicsView, QGraphicsScene,
 )
 from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF, QThread
@@ -33,8 +33,31 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
+
+# アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
+_UPDATER_DIR  = os.path.join(os.environ.get("APPDATA", ""), "NaroEditor")
+_UPDATER_NAME = "NaroEditorUpdater.exe"
+_UPDATER_PATH = os.path.join(_UPDATER_DIR, _UPDATER_NAME)
+
+
+def _ensure_updater() -> None:
+    """バンドル済み NaroEditorUpdater.exe を AppData へ展開する（frozen 時のみ）。"""
+    if not getattr(sys, "frozen", False):
+        return
+    src = os.path.join(getattr(sys, "_MEIPASS", ""), _UPDATER_NAME)
+    if not os.path.isfile(src):
+        return
+    os.makedirs(_UPDATER_DIR, exist_ok=True)
+    try:
+        if (os.path.isfile(_UPDATER_PATH)
+                and os.path.getsize(_UPDATER_PATH) == os.path.getsize(src)):
+            return  # 同サイズなら上書き不要
+        import shutil as _shutil
+        _shutil.copy2(src, _UPDATER_PATH)
+    except OSError:
+        pass
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette
@@ -2478,53 +2501,6 @@ class _UpdateChecker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# Auto-update: download thread
-# ---------------------------------------------------------------------------
-class _DownloadThread(QThread):
-    """EXE を非同期ダウンロードする。"""
-    progress = pyqtSignal(int, int)  # (downloaded_bytes, total_bytes)
-    finished = pyqtSignal(str)       # downloaded file path
-    failed   = pyqtSignal(str)       # error message
-
-    def __init__(self, url: str, dest: str, parent=None):
-        super().__init__(parent)
-        self._url  = url
-        self._dest = dest
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:
-        try:
-            import urllib.request as _ur
-            req = _ur.Request(
-                self._url,
-                headers={"User-Agent": f"NaroEditor/{APP_VERSION}"},
-            )
-            with _ur.urlopen(req, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length", 0))
-                downloaded = 0
-                with open(self._dest, "wb") as f:
-                    while not self._cancelled:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        self.progress.emit(downloaded, total)
-            if self._cancelled:
-                try:
-                    os.remove(self._dest)
-                except OSError:
-                    pass
-            else:
-                self.finished.emit(self._dest)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class NaroEditor(QMainWindow):
@@ -2569,6 +2545,7 @@ class NaroEditor(QMainWindow):
         except OSError:
             pass
         QTimer.singleShot(0, self._restore_session)
+        QTimer.singleShot(0, _ensure_updater)
         QTimer.singleShot(3000, self._check_for_update)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
@@ -3387,87 +3364,25 @@ class NaroEditor(QMainWindow):
             QMessageBox.StandardButton.Yes,
         )
         if ret == QMessageBox.StandardButton.Yes:
-            self._start_download(version, url)
+            self._launch_updater(version, url)
 
-    def _start_download(self, version: str, url: str) -> None:
-        import tempfile
-        dest = os.path.join(tempfile.gettempdir(), f"NaroEditor_{version}_new.exe")
-        self._dl_dest = dest
-
-        self._dl_progress = QProgressDialog(
-            f"NaroEditor v{version} をダウンロード中…", "キャンセル", 0, 100, self
-        )
-        self._dl_progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self._dl_progress.setMinimumDuration(0)
-        self._dl_progress.setValue(0)
-
-        self._dl_thread = _DownloadThread(url, dest, self)
-        self._dl_thread.progress.connect(self._on_dl_progress)
-        self._dl_thread.finished.connect(self._on_download_finished)
-        self._dl_thread.failed.connect(self._on_download_failed)
-        self._dl_progress.canceled.connect(self._dl_thread.cancel)
-        self._dl_thread.start()
-
-    def _on_dl_progress(self, downloaded: int, total: int) -> None:
-        if total > 0:
-            self._dl_progress.setValue(int(downloaded * 100 / total))
-        else:
-            self._dl_progress.setMaximum(0)  # indeterminate (Content-Length unknown)
-
-    def _on_download_failed(self, err: str) -> None:
-        self._dl_progress.close()
-        QMessageBox.warning(self, "ダウンロード失敗",
-                            f"アップデートのダウンロードに失敗しました。\n{err}")
-
-    def _on_download_finished(self, path: str) -> None:
-        self._dl_progress.close()
-        ret = QMessageBox.question(
-            self,
-            "アップデートの適用",
-            "ダウンロードが完了しました。\nNaroEditor を再起動してアップデートを適用しますか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ret == QMessageBox.StandardButton.Yes:
-            self._apply_update(path)
-
-    def _apply_update(self, new_exe_path: str) -> None:
-        current_exe = sys.executable
-        # sys._MEIPASS = "...\NaroEditor\_MEI<PID>" → parent is runtime_tmpdir
-        meipass = getattr(sys, "_MEIPASS", "")
-        runtime_dir = os.path.dirname(meipass) if meipass else ""
-        import tempfile, subprocess
-        ps_path = os.path.join(tempfile.gettempdir(), "NaroEditor_update.ps1")
-
-        mei_cleanup = (
-            f'Get-ChildItem -LiteralPath "{runtime_dir}" -Filter "_MEI*"'
-            f' -Directory -ErrorAction SilentlyContinue'
-            f' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\n'
-        ) if runtime_dir else ""
-
-        # PowerShell script:
-        #   1. Wait for the old process to exit and release all DLL locks
-        #   2. Unblock-File: remove Zone.Identifier (Mark of the Web) so LoadLibrary isn't blocked
-        #   3. Remove-Item Env:_MEIPASS2: PyInstaller frozen EXEs inherit _MEIPASS2 pointing to
-        #      the OLD extraction folder. Clearing it forces the new EXE to create a fresh _MEI*.
-        #   4. Delete leftover _MEI* folders so the new EXE starts with a clean extraction
-        #   5. Move new EXE into place
-        #   6. Start-Process: launch in a new, clean process context
-        ps = (
-            "Start-Sleep -Seconds 8\n"
-            f'Unblock-File -LiteralPath "{new_exe_path}" -ErrorAction SilentlyContinue\n'
-            "Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue\n"
-            f"{mei_cleanup}"
-            f'Move-Item -LiteralPath "{new_exe_path}" -Destination "{current_exe}" -Force\n'
-            f'Start-Process -FilePath "{current_exe}"\n'
-            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-        )
-        with open(ps_path, "w", encoding="utf-8-sig") as f:
-            f.write(ps)
+    def _launch_updater(self, version: str, url: str) -> None:
+        """NaroEditorUpdater.exe を起動して自身は終了する。"""
+        if not os.path.isfile(_UPDATER_PATH):
+            QMessageBox.warning(
+                self, "アップデート",
+                "アップデータが見つかりません。\n"
+                f"{_UPDATER_DIR} に NaroEditorUpdater.exe を配置してください。",
+            )
+            return
+        import subprocess
         subprocess.Popen(
-            ["powershell.exe", "-NonInteractive", "-WindowStyle", "Hidden",
-             "-ExecutionPolicy", "Bypass", "-File", ps_path],
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            [_UPDATER_PATH,
+             "--pid",     str(os.getpid()),
+             "--url",     url,
+             "--target",  sys.executable,
+             "--version", version],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         QApplication.instance().quit()
 
