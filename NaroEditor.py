@@ -20,10 +20,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QDialog, QLineEdit, QCheckBox, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QFileDialog, QMessageBox, QFrame, QTreeView, QTabWidget, QTabBar,
-    QTextBrowser, QComboBox, QInputDialog, QMenu,
+    QTextBrowser, QComboBox, QInputDialog, QMenu, QProgressDialog,
     QGraphicsView, QGraphicsScene,
 )
-from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF
+from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF, QThread
 from PyQt6.QtGui import QTransform
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QFontMetricsF, QPainter, QColor, QTextCursor, QKeySequence,
@@ -33,7 +33,8 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
+_GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette
@@ -1450,6 +1451,8 @@ class PreviewBrowser(QTextBrowser):
         self.document().documentLayout().registerHandler(
             _RUBY_OBJ_TYPE, self._ruby_obj)
 
+        self.document().setUndoRedoEnabled(False)
+
         # ルビ位置をブロック番号 + ブロック内オフセットで管理
         # (block_num, pos_in_block, base, reading)
         self._rubies: list[tuple[int, int, str, str]] = []
@@ -1458,6 +1461,12 @@ class PreviewBrowser(QTextBrowser):
         self._title_cache: str = ""
         self._body_block: QTextBlockFormat | None = None
         self._body_char: QTextCharFormat | None = None
+        # 遅延レンダリング管理
+        self._rendered: set[int] = set()
+        self._line_height_px: float = 0.0
+        self._title_height_px: float = 0.0
+        # _apply_margins のキャッシュ（同マージンで setFrameFormat を呼ばないため）
+        self._margin_side_cache: int | None = None
 
     def set_theme(self, theme_id: str) -> None:
         self._theme = _THEMES.get(theme_id, _THEMES["narou"])
@@ -1467,6 +1476,8 @@ class PreviewBrowser(QTextBrowser):
         self._body_block = None
         self._line_cache = []
         self._title_cache = ""
+        self._rendered.clear()
+        self._margin_side_cache = None
 
     def _make_body_formats(self) -> tuple[QTextBlockFormat, QTextCharFormat, QFont]:
         th = self._theme
@@ -1484,17 +1495,17 @@ class PreviewBrowser(QTextBrowser):
         return body_block, body_char, body_font
 
     def _update_line(self, line_idx: int, new_line: str) -> None:
-        """変更された1行だけをプレビュードキュメント内で差し替える。"""
+        """レンダリング済みの1行をドキュメント内で差し替える。未レンダリング行はスキップ。"""
+        if line_idx not in self._rendered:
+            return
         title_offset = 1 if self._title_cache.strip() else 0
         block_num = line_idx + title_offset
         doc = self.document()
         block = doc.findBlockByNumber(block_num)
         if not block.isValid():
             return
-        # この行のルビだけ除去し、再挿入で補完する
         self._rubies = [r for r in self._rubies if r[0] != block_num]
         cursor = QTextCursor(block)
-        cursor.beginEditBlock()
         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
                             QTextCursor.MoveMode.KeepAnchor)
@@ -1502,26 +1513,31 @@ class PreviewBrowser(QTextBrowser):
         cursor.setBlockFormat(self._body_block)
         cursor.setCharFormat(self._body_char)
         self._insert_line(cursor, new_line, self._body_char)
-        cursor.endEditBlock()
 
-    def update_preview(self, body: str, title: str = "") -> None:
+    def update_preview(self, body: str, title: str = "") -> bool:
+        """プレビューを更新する。
+        True  = 全再構築（_sync_scene_rect が必要）
+        False = 再描画のみ or 変化なし
+        """
         new_lines = body.split("\n")
 
-        # ── 差分更新パス ─────────────────────────────────────────────
-        # 行数が同じ・タイトル不変・フォーマット準備済みの場合のみ適用
+        # 変化なし
+        if (self._body_block is not None
+                and title == self._title_cache
+                and new_lines == self._line_cache):
+            return False
+
+        # ── 行数・タイトル変化なし → QTextDocument の構造はそのまま ──────────
+        # _rendered をクリアして _trigger_render に可視行の再描画を委ねる。
+        # doc.clear() + insertText("\n"*(N-1)) の O(N log N) Qt 操作をスキップ。
         if (self._body_block is not None
                 and title == self._title_cache
                 and len(new_lines) == len(self._line_cache)):
-            changed = [i for i, (a, b) in enumerate(zip(self._line_cache, new_lines)) if a != b]
-            if not changed:
-                return
-            if len(changed) <= 10:
-                for i in changed:
-                    self._update_line(i, new_lines[i])
-                self._line_cache = list(new_lines)
-                return
+            self._line_cache = new_lines
+            self._rendered.clear()
+            return False  # 高さ変化なし → _sync_scene_rect 不要
 
-        # ── 全再構築パス ─────────────────────────────────────────────
+        # ── 全再構築パス（行数変化・タイトル変化・初回）──────────────────────
         th = self._theme
         pal = self.palette()
         pal.setColor(QPalette.ColorRole.Text, QColor(th["fg"]))
@@ -1535,8 +1551,12 @@ class PreviewBrowser(QTextBrowser):
         doc.setDefaultFont(body_font)
         doc.clear()
         self._rubies.clear()
+        self._rendered.clear()
+        self._margin_side_cache = None  # doc.clear() でフレーム書式がリセットされるため
         cursor = QTextCursor(doc)
 
+        # フレームtopMargin=20 を基準にタイトルブロック高さを計算
+        title_h = 20.0
         if title.strip():
             t_font = QFont(th["font_qt"])
             t_font.setPixelSize(round(th["title_px"]))
@@ -1564,17 +1584,67 @@ class PreviewBrowser(QTextBrowser):
             cursor.insertText(title.strip())
             cursor.insertBlock(body_block, body_char)
 
-        first = True
-        for line in new_lines:
-            if not first:
-                cursor.insertBlock(body_block, body_char)
-            first = False
-            cursor.setBlockFormat(body_block)
-            self._insert_line(cursor, line, body_char)
+            title_h += (round(th["title_px"] * th["title_lh"])
+                        + th["title_mt"] + th["title_mb"])
 
-        self._line_cache  = list(new_lines)
-        self._title_cache = title
+        # 全ボディブロックをプレースホルダー（空）として一括挿入。
+        # insertBlock を N 回ループすると O(N²) になるため、
+        # "\n" * (N-1) の一括 insertText でブロック分割を1回のレイアウト更新に集約する。
+        cursor.setBlockFormat(body_block)
+        cursor.setCharFormat(body_char)
+        if len(new_lines) > 1:
+            cursor.insertText("\n" * (len(new_lines) - 1))
+
+        self._line_cache      = list(new_lines)
+        self._title_cache     = title
+        self._line_height_px  = float(round(th["font_px"] * th["line_height"]))
+        self._title_height_px = title_h
         self._apply_margins()
+        return True
+
+    def update_dirty_lines(self, dirty: dict[int, str]) -> bool:
+        """指定行のみ差分更新する。全再構築が必要な場合は True を返す。"""
+        if self._body_block is None or not self._line_cache:
+            return True
+        if any(i < 0 or i >= len(self._line_cache) for i in dirty):
+            return True
+        for line_idx, text in dirty.items():
+            self._line_cache[line_idx] = text
+            self._update_line(line_idx, text)
+        return False
+
+    def render_range(self, first_line: int, last_line: int) -> bool:
+        """first_line..last_line の未レンダリング行をドキュメントに書き込む。
+        1行でも書いたら True を返す。"""
+        if not self._line_cache or self._line_height_px == 0:
+            return False
+        n = len(self._line_cache)
+        first_line = max(0, first_line)
+        last_line  = min(n - 1, last_line)
+        if first_line > last_line:
+            return False
+        title_offset = 1 if self._title_cache.strip() else 0
+        doc = self.document()
+        rendered_any = False
+        for line_idx in range(first_line, last_line + 1):
+            if line_idx in self._rendered:
+                continue
+            block_num = line_idx + title_offset
+            block = doc.findBlockByNumber(block_num)
+            if not block.isValid():
+                continue
+            self._rubies = [r for r in self._rubies if r[0] != block_num]
+            cursor = QTextCursor(block)
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                                QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.setBlockFormat(self._body_block)
+            cursor.setCharFormat(self._body_char)
+            self._insert_line(cursor, self._line_cache[line_idx], self._body_char)
+            self._rendered.add(line_idx)
+            rendered_any = True
+        return rendered_any
 
     def _insert_line(self, cursor: QTextCursor,
                      line: str, base_fmt: QTextCharFormat) -> None:
@@ -1648,6 +1718,9 @@ class PreviewBrowser(QTextBrowser):
         th = self._theme
         vw = self.viewport().width()
         side = max(16, (vw - th["content_w"]) // 2)
+        if self._margin_side_cache == side:
+            return  # マージン変化なし → setFrameFormat による O(N) 再レイアウトを回避
+        self._margin_side_cache = side
         fmt = QTextFrameFormat()
         fmt.setLeftMargin(side)
         fmt.setRightMargin(side)
@@ -1741,6 +1814,8 @@ class _PreviewScaleView(QGraphicsView):
         self._browser.document().documentLayout().documentSizeChanged.connect(
             self._sync_scene_rect
         )
+        self._rendering = False
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
     @property
     def browser(self) -> PreviewBrowser:
@@ -1749,14 +1824,31 @@ class _PreviewScaleView(QGraphicsView):
     # ------------------------------------------------------------------
     # Delegate PreviewBrowser API
     # ------------------------------------------------------------------
+    def update_dirty_lines(self, dirty: dict[int, str]) -> bool:
+        """差分行のみ更新する。全再構築が必要な場合は True を返す。"""
+        layout = self._browser.document().documentLayout()
+        layout.blockSignals(True)
+        try:
+            needs_rebuild = self._browser.update_dirty_lines(dirty)
+        finally:
+            layout.blockSignals(False)
+        if not needs_rebuild:
+            self._trigger_render()
+        return needs_rebuild
+
     def update_preview(self, body: str, title: str = "") -> None:
         layout = self._browser.document().documentLayout()
         layout.blockSignals(True)
         try:
-            self._browser.update_preview(body, title)
+            full_rebuild = self._browser.update_preview(body, title)
         finally:
             layout.blockSignals(False)
-        self._sync_scene_rect()
+        # 全再構築時のみ _sync_scene_rect を直接呼ぶ。
+        # 差分更新時は document().size() の O(N) レイアウト再計算を避け、
+        # 高さ変化が生じた場合は _trigger_render 内の _sync_scene_rect が補完する。
+        if full_rebuild:
+            self._sync_scene_rect()
+        self._trigger_render()
 
     def set_theme(self, theme_id: str) -> None:
         self._browser.set_theme(theme_id)
@@ -1774,6 +1866,7 @@ class _PreviewScaleView(QGraphicsView):
         self.setTransform(t)
         self.updateGeometry()   # レイアウトに最小サイズの再評価を通知
         self._sync_scene_rect()
+        self._trigger_render()
 
     @property
     def scale_factor(self) -> float:
@@ -1790,16 +1883,72 @@ class _PreviewScaleView(QGraphicsView):
     # ------------------------------------------------------------------
     def _sync_scene_rect(self) -> None:
         """ブラウザの文書高さに合わせてシーンサイズを更新する。"""
-        doc_h = self._browser.document().size().height()
-        # ビューポートが文書より大きい場合でも余白がつぶれないよう確保
+        br = self._browser
+        n  = len(br._line_cache)
+        lh = br._line_height_px
+        if n > 0 and lh > 0:
+            # FixedHeight ブロックの高さは数式で確定できる → Qt の O(N) レイアウト計算を回避
+            # document().size() = _title_height_px + N × lineHeight + frameBottomMargin(40)
+            # +40 は旧実装の document().size() + 40 に合わせたコンテンツ下余白
+            doc_h = br._title_height_px + n * lh + 40.0
+        else:
+            doc_h = float(br.document().size().height())
         min_h = self.viewport().height() / self._scale if self._scale > 0 else doc_h
-        h = max(doc_h + 40, min_h)
-        self._browser.setFixedHeight(int(h))
+        h = max(doc_h + 40, min_h)  # +40: コンテンツ末尾に余白を確保（旧実装と同一）
+        h_int = int(h)
+        if br.height() != h_int:
+            br.setFixedHeight(h_int)  # 高さ変化時のみ setFixedHeight（resizeEvent 抑制）
         self.setSceneRect(QRectF(0, 0, _PREVIEW_MIN_W, h))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._sync_scene_rect()
+        self._trigger_render()
+
+    # ------------------------------------------------------------------
+    # Lazy rendering
+    # ------------------------------------------------------------------
+    def _visible_line_range(self) -> tuple[int, int]:
+        """現在の表示範囲 ±2倍バッファに対応する行番号範囲を返す。"""
+        br = self._browser
+        n = len(br._line_cache)
+        if n == 0 or br._line_height_px <= 0:
+            return (0, -1)
+        # QGraphicsView のスクロール値はビューポートピクセル座標 → スケールで割ってシーン座標に変換
+        doc_top = float(self.verticalScrollBar().value()) / max(self._scale, 0.01)
+        doc_vis = self.viewport().height() / max(self._scale, 0.01)
+        buffer  = doc_vis * 2.0
+        title_h = br._title_height_px
+        lh      = br._line_height_px
+        first = max(0, int((doc_top - buffer - title_h) / lh))
+        last  = min(n - 1, int((doc_top + doc_vis + buffer - title_h) / lh) + 1)
+        return (first, last)
+
+    def _trigger_render(self) -> None:
+        """可視範囲 ±2画面バッファの未レンダリング行を書き込む。"""
+        if self._rendering:
+            return
+        self._rendering = True
+        try:
+            first, last = self._visible_line_range()
+            if first > last:
+                return
+            layout = self._browser.document().documentLayout()
+            layout.blockSignals(True)
+            try:
+                rendered = self._browser.render_range(first, last)
+            finally:
+                layout.blockSignals(False)
+            if rendered:
+                self._sync_scene_rect()
+                # blockSignals により layout の update(rect) シグナルが抑制されているため
+                # 明示的に再描画を要求する（QGraphicsProxyWidget 経由でも確実に反映）
+                self.scene().update()
+        finally:
+            self._rendering = False
+
+    def _on_scroll(self) -> None:
+        self._trigger_render()
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1989,13 @@ class PreviewPane(QWidget):
 
     def set_content(self, body: str, title: str = "") -> None:
         self._view.update_preview(body, title)
+
+    def update_dirty_lines(self, dirty: dict[int, str], title: str) -> bool:
+        """差分行のみ更新する。タイトル変化・キャッシュ不整合なら True（全再構築要）を返す。"""
+        browser = self._view.browser
+        if title != browser._title_cache:
+            return True
+        return self._view.update_dirty_lines(dirty)
 
     def sync_theme(self) -> None:
         """Re-read config theme and update combo silently (no signal emit)."""
@@ -2117,6 +2273,9 @@ class PreviewWindow(QWidget):
     def set_content(self, body: str, title: str = "") -> None:
         self._pane.set_content(body, title)
 
+    def update_dirty_lines(self, dirty: dict[int, str], title: str) -> bool:
+        return self._pane.update_dirty_lines(dirty, title)
+
     def _on_pane_theme_changed(self) -> None:
         self.theme_changed.emit()
 
@@ -2279,6 +2438,93 @@ class _SplitOverlay(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Auto-update: version check thread
+# ---------------------------------------------------------------------------
+class _UpdateChecker(QThread):
+    """GitHub releases API を非同期で問い合わせ、新バージョンがあれば通知する。"""
+    update_available = pyqtSignal(str, str)  # (latest_version, download_url)
+    no_update        = pyqtSignal()           # 最新バージョン使用中
+    check_error      = pyqtSignal()           # ネットワーク／解析エラー
+
+    def __init__(self, current_version: str, parent=None):
+        super().__init__(parent)
+        self._current = current_version
+
+    def run(self) -> None:
+        try:
+            import urllib.request as _ur
+            req = _ur.Request(
+                _GITHUB_API_LATEST,
+                headers={"User-Agent": f"NaroEditor/{self._current}"},
+            )
+            with _ur.urlopen(req, timeout=10) as resp:
+                import json as _json
+                data = _json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("vV")
+            if not tag:
+                self.no_update.emit()
+                return
+            if (tuple(map(int, tag.split(".")))
+                    <= tuple(map(int, self._current.split(".")))):
+                self.no_update.emit()
+                return
+            for asset in data.get("assets", []):
+                if asset.get("name", "").lower().endswith(".exe"):
+                    self.update_available.emit(tag, asset["browser_download_url"])
+                    return
+            self.no_update.emit()  # リリースはあるが EXE アセットなし
+        except Exception:
+            self.check_error.emit()
+
+
+# ---------------------------------------------------------------------------
+# Auto-update: download thread
+# ---------------------------------------------------------------------------
+class _DownloadThread(QThread):
+    """EXE を非同期ダウンロードする。"""
+    progress = pyqtSignal(int, int)  # (downloaded_bytes, total_bytes)
+    finished = pyqtSignal(str)       # downloaded file path
+    failed   = pyqtSignal(str)       # error message
+
+    def __init__(self, url: str, dest: str, parent=None):
+        super().__init__(parent)
+        self._url  = url
+        self._dest = dest
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            import urllib.request as _ur
+            req = _ur.Request(
+                self._url,
+                headers={"User-Agent": f"NaroEditor/{APP_VERSION}"},
+            )
+            with _ur.urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(self._dest, "wb") as f:
+                    while not self._cancelled:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        self.progress.emit(downloaded, total)
+            if self._cancelled:
+                try:
+                    os.remove(self._dest)
+                except OSError:
+                    pass
+            else:
+                self.finished.emit(self._dest)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class NaroEditor(QMainWindow):
@@ -2313,8 +2559,8 @@ class NaroEditor(QMainWindow):
         self._autosave_timer.start()
         self._preview_update_timer = QTimer(self)
         self._preview_update_timer.setSingleShot(True)
-        self._preview_update_timer.setInterval(300)
         self._preview_update_timer.timeout.connect(self._do_preview_update)
+        self._preview_editor_block_count: int = 0
         # クラッシュ判定はロックファイル作成より前に行う
         self._prev_crashed = os.path.isfile(_LOCK_PATH)
         try:
@@ -2323,6 +2569,7 @@ class NaroEditor(QMainWindow):
         except OSError:
             pass
         QTimer.singleShot(0, self._restore_session)
+        QTimer.singleShot(3000, self._check_for_update)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
     # ------------------------------------------------------------------
@@ -2371,7 +2618,7 @@ class NaroEditor(QMainWindow):
         # Dock-mode preview pane (hidden until activated)
         self._dock_pane = PreviewPane()
         self._dock_pane.set_dock_mode(True)
-        self._dock_pane.theme_changed.connect(self._do_preview_update)
+        self._dock_pane.theme_changed.connect(self._force_preview_update)
         self._dock_pane.dock_toggled.connect(self._toggle_preview_mode)
         self._dock_pane.zoom_changed.connect(self._on_dock_zoom_changed)
         self._dock_pane.hide()
@@ -2474,6 +2721,8 @@ class NaroEditor(QMainWindow):
         hm = mb.addMenu("ヘルプ")
         hm.addAction("使い方", QKeySequence("F1"), self._show_help)
         hm.addSeparator()
+        self._act_check_update = hm.addAction("アップデートを確認", self._check_for_update_manual)
+        hm.addSeparator()
         hm.addAction("バージョン情報", self._show_about)
 
     # ------------------------------------------------------------------
@@ -2570,7 +2819,7 @@ class NaroEditor(QMainWindow):
         self._active_pane = new_pane
         self._update_window_title()
         self._update_status()
-        self._do_preview_update()
+        self._force_preview_update()
 
     def _remove_pane(self, pane: QTabWidget) -> None:
         if pane in self._panes:
@@ -2608,7 +2857,7 @@ class NaroEditor(QMainWindow):
         self._remove_pane(src)
         self._update_window_title()
         self._update_status()
-        self._do_preview_update()
+        self._force_preview_update()
 
     def _update_view_menu(self) -> None:
         can_split = (len(self._panes) < 2
@@ -2804,7 +3053,9 @@ class NaroEditor(QMainWindow):
             lambda mod, e=ed: self._on_mod_changed(e, mod)
         )
         ed.document().contentsChanged.connect(self._update_status)
-        ed.document().contentsChanged.connect(self._preview_update_timer.start)
+        ed.document().contentsChange.connect(
+            lambda pos, rm, add, _ed=ed: self._on_editor_change(_ed, pos, rm, add)
+        )
         return ed
 
     def _tab_title(self, editor: CodeEditor) -> str:
@@ -2859,7 +3110,7 @@ class NaroEditor(QMainWindow):
     def _on_tab_changed(self, _index: int) -> None:
         self._update_window_title()
         self._update_status()
-        self._do_preview_update()
+        self._force_preview_update()
 
     def _on_pane_tab_changed(self, pane: QTabWidget, index: int) -> None:
         self._active_pane = pane
@@ -2880,7 +3131,7 @@ class NaroEditor(QMainWindow):
                 if pane.widget(i) is w:
                     if self._active_pane is not pane:
                         self._active_pane = pane
-                        self._do_preview_update()
+                        self._force_preview_update()
                     return
 
     def _on_mod_changed(self, editor: CodeEditor, _modified: bool) -> None:
@@ -3085,6 +3336,122 @@ class NaroEditor(QMainWindow):
                 QTimer.singleShot(0, _open_dock)
 
     # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+    def _check_for_update(self) -> None:
+        if not getattr(sys, "frozen", False):
+            return
+        self._update_checker = _UpdateChecker(APP_VERSION, self)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    def _check_for_update_manual(self) -> None:
+        self._act_check_update.setEnabled(False)
+        self._act_check_update.setText("確認中…")
+        checker = _UpdateChecker(APP_VERSION, self)
+        self._manual_update_checker = checker
+
+        def _restore_action():
+            self._act_check_update.setEnabled(True)
+            self._act_check_update.setText("アップデートを確認")
+
+        def _on_no_update():
+            _restore_action()
+            QMessageBox.information(
+                self, "アップデートの確認",
+                f"NaroEditor は最新バージョン (v{APP_VERSION}) です。",
+            )
+
+        def _on_error():
+            _restore_action()
+            QMessageBox.warning(
+                self, "アップデートの確認",
+                "アップデートの確認に失敗しました。\nネットワーク接続を確認してください。",
+            )
+
+        def _on_available(version: str, url: str):
+            _restore_action()
+            self._on_update_available(version, url)
+
+        checker.update_available.connect(_on_available)
+        checker.no_update.connect(_on_no_update)
+        checker.check_error.connect(_on_error)
+        checker.start()
+
+    def _on_update_available(self, version: str, url: str) -> None:
+        ret = QMessageBox.question(
+            self,
+            "アップデートの確認",
+            f"NaroEditor v{version} が公開されています。\n今すぐアップデートしますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._start_download(version, url)
+
+    def _start_download(self, version: str, url: str) -> None:
+        import tempfile
+        dest = os.path.join(tempfile.gettempdir(), f"NaroEditor_{version}_new.exe")
+        self._dl_dest = dest
+
+        self._dl_progress = QProgressDialog(
+            f"NaroEditor v{version} をダウンロード中…", "キャンセル", 0, 100, self
+        )
+        self._dl_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._dl_progress.setMinimumDuration(0)
+        self._dl_progress.setValue(0)
+
+        self._dl_thread = _DownloadThread(url, dest, self)
+        self._dl_thread.progress.connect(self._on_dl_progress)
+        self._dl_thread.finished.connect(self._on_download_finished)
+        self._dl_thread.failed.connect(self._on_download_failed)
+        self._dl_progress.canceled.connect(self._dl_thread.cancel)
+        self._dl_thread.start()
+
+    def _on_dl_progress(self, downloaded: int, total: int) -> None:
+        if total > 0:
+            self._dl_progress.setValue(int(downloaded * 100 / total))
+        else:
+            self._dl_progress.setMaximum(0)  # indeterminate (Content-Length unknown)
+
+    def _on_download_failed(self, err: str) -> None:
+        self._dl_progress.close()
+        QMessageBox.warning(self, "ダウンロード失敗",
+                            f"アップデートのダウンロードに失敗しました。\n{err}")
+
+    def _on_download_finished(self, path: str) -> None:
+        self._dl_progress.close()
+        ret = QMessageBox.question(
+            self,
+            "アップデートの適用",
+            "ダウンロードが完了しました。\nNaroEditor を再起動してアップデートを適用しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._apply_update(path)
+
+    def _apply_update(self, new_exe_path: str) -> None:
+        current_exe = sys.executable
+        import tempfile
+        bat_path = os.path.join(tempfile.gettempdir(), "NaroEditor_update.bat")
+        bat = (
+            "@echo off\r\n"
+            "ping -n 4 127.0.0.1 > nul\r\n"
+            f"move /y \"{new_exe_path}\" \"{current_exe}\"\r\n"
+            f"start \"\" \"{current_exe}\"\r\n"
+            "(goto) 2>nul & del \"%~f0\"\r\n"
+        )
+        with open(bat_path, "w", encoding="mbcs") as f:
+            f.write(bat)
+        import subprocess
+        subprocess.Popen(
+            ["cmd.exe", "/c", bat_path],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        QApplication.instance().quit()
+
+    # ------------------------------------------------------------------
     # Crash recovery
     # ------------------------------------------------------------------
     def _do_autosave(self) -> None:
@@ -3211,16 +3578,16 @@ class NaroEditor(QMainWindow):
                 want = content_w + 80
                 total = sizes[0] + sizes[1] + sizes[2]
                 self._main_splitter.setSizes([sizes[0], total - sizes[0] - want, want])
-                self._do_preview_update()
+                self._force_preview_update()
         else:
             if self._preview is None:
                 self._preview = PreviewWindow()
                 self._preview.closed.connect(self._on_preview_closed)
-                self._preview.theme_changed.connect(self._do_preview_update)
+                self._preview.theme_changed.connect(self._force_preview_update)
                 self._preview.dock_toggled.connect(self._toggle_preview_mode)
                 self._preview.zoom_changed.connect(self._on_float_zoom_changed)
                 self._preview.show()
-                self._do_preview_update()
+                self._force_preview_update()
                 # 保存済みズーム倍率をウィンドウ幅に反映する
                 factor = self._preview.current_zoom_factor
                 if factor != 1.0:
@@ -3272,6 +3639,26 @@ class NaroEditor(QMainWindow):
         if was_open:
             self._toggle_preview()
 
+    def _on_editor_change(self, ed: "CodeEditor",
+                          pos: int, removed: int, added: int) -> None:
+        """行数が変化した（改行・行削除）なら即時、文字入力のみなら 2 秒後にプレビューを更新する。"""
+        if ed is not self._editor:
+            return
+        new_count = ed.document().blockCount()
+        block_changed = (new_count != self._preview_editor_block_count)
+        self._preview_editor_block_count = new_count
+        # 改行・行削除は即時反映、文字入力のみは 300ms デバウンス
+        self._preview_update_timer.start(0 if block_changed else 300)
+
+    def _force_preview_update(self) -> None:
+        """強制的に全再構築でプレビューを更新する（タブ切替・テーマ変更等）。"""
+        self._do_preview_update()
+
+    def _get_preview_title(self, cur: "CodeEditor") -> str:
+        if cur.file_path:
+            return os.path.splitext(os.path.basename(cur.file_path))[0]
+        return "新規ファイル"
+
     def _do_preview_update(self) -> None:
         if self._preview_mode == "dock":
             target = self._dock_pane if self._dock_pane.isVisible() else None
@@ -3280,14 +3667,11 @@ class NaroEditor(QMainWindow):
         if target is None:
             return
         cur = self._editor
-        text = cur.toPlainText() if cur else ""
-        title = ""
-        if cur:
-            if cur.file_path:
-                title = os.path.splitext(os.path.basename(cur.file_path))[0]
-            else:
-                title = "新規ファイル"
-        target.set_content(text, title)
+        if cur is None:
+            return
+        title = self._get_preview_title(cur)
+        target.set_content(cur.toPlainText(), title)
+        self._preview_editor_block_count = cur.document().blockCount()
 
     # ------------------------------------------------------------------
     # Search / Replace
@@ -3589,7 +3973,9 @@ class NaroEditor(QMainWindow):
         cur = e.textCursor()
         if not cur.hasSelection():
             return
-        result = "".join(f"|{ch}《・》" for ch in cur.selectedText())
+        # 空白・改行（Qt の段落区切り U+2029 を含む）はそのまま通す
+        result = "".join(ch if ch.isspace() else f"|{ch}《・》"
+                         for ch in cur.selectedText())
         cur.insertText(result)
 
     def _bouten_pixiv(self) -> None:
