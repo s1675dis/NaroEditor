@@ -103,6 +103,8 @@
 - **バグ修正**: アップデート後の起動時に python DLL 読み込みが失敗する問題を修正
   - `subprocess.Popen(env=None)` では Win32 環境ブロックから `_MEIPASS2` が除去されないため、`env=` に明示的な辞書を渡して除外するよう変更
   - C# アップデータ側でも `UseShellExecute=false` + `_MEIPASS2` 削除を追加（二重防衛）
+- **バグ修正**: 別ユーザー環境での起動時に `Could not create temporary directory!` エラーが発生する問題を修正
+  - `runtime_tmpdir` にハードコードされたユーザー固有パスを指定していたため削除。PyInstaller がシステムの `%TEMP%` を自動使用するよう変更
 
 ### v1.2.7
 
