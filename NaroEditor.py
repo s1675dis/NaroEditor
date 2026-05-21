@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.11"
+APP_VERSION = "1.2.12"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3477,7 +3477,8 @@ class NaroEditor(QMainWindow):
         # これにより新 NaroEditor.exe が旧 _MEI* フォルダを参照する問題を確実に防ぐ。
         ctypes.windll.kernel32.SetEnvironmentVariableW("_MEIPASS2", None)
         os.environ.pop("_MEIPASS2", None)
-        env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
+        # 大文字小文字を問わず除外（念のための安全策）
+        env = {k: v for k, v in os.environ.items() if k.upper() != "_MEIPASS2"}
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),

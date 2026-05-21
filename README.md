@@ -94,6 +94,13 @@
 
 ## 変更履歴
 
+### v1.2.12
+
+- **バグ修正**: アップデート後の起動時に python DLL 読み込みが失敗する問題を再修正
+  - C# アップデータで `ProcessStartInfo.EnvironmentVariables` に明示的な環境変数辞書を渡す方式に変更。`lpEnvironment=NULL`（親プロセス継承）では `_MEIPASS2` が残る場合があったため
+  - Python 側の `_MEIPASS2` 除外フィルタを大文字小文字を問わない比較に変更
+  - `NaroEditorUpdater.py`（旧 Python 版アップデータ）および `NaroEditorUpdater.spec` を完全に削除（git 履歴からも除去）
+
 ### v1.2.11
 
 - **バグ修正**: プレビュー画面でマウスホイールによるスクロールができなかった問題を修正

@@ -198,24 +198,28 @@ namespace NaroEditorUpdater
 
                 // 3. Launch updated NaroEditor without PyInstaller env vars.
                 //
-                // Strategy: explicitly remove _MEIPASS2 from THIS process's Win32
-                // environment block via SetEnvironmentVariable, then start the new
-                // NaroEditor without passing an explicit environment (lpEnvironment=NULL),
-                // so it inherits THIS process's now-clean environment.  This is more
-                // reliable than manipulating ProcessStartInfo.EnvironmentVariables whose
-                // StringDictionary lowercases keys and may behave unexpectedly.
-                string meiVal = Environment.GetEnvironmentVariable("_MEIPASS2");
-                Log("_MEIPASS2 before launch: " + (meiVal ?? "(not set)"));
-                if (meiVal != null)
-                {
-                    Environment.SetEnvironmentVariable("_MEIPASS2", null);
-                    Log("Cleared _MEIPASS2 from this process's environment.");
-                    Log("_MEIPASS2 after clear: "
-                        + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
-                }
+                // Strategy: build an EXPLICIT environment dictionary for ProcessStartInfo
+                // (triggering lpEnvironment != NULL in CreateProcess) and remove _MEIPASS2
+                // from it.  Using lpEnvironment=NULL (inheritance) proved unreliable even
+                // after SetEnvironmentVariable; an explicit dict is the only guaranteed way
+                // to prevent the child from seeing _MEIPASS2.
+                Log("_MEIPASS2 before launch: "
+                    + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
+
+                // Also clear from this process env as defense-in-depth
+                Environment.SetEnvironmentVariable("_MEIPASS2", null);
+
+                var psi = new ProcessStartInfo(_target) { UseShellExecute = false };
+                // Accessing EnvironmentVariables populates it from current process env
+                // (StringDictionary; keys stored lowercase, lookups case-insensitive)
+                var ev = psi.EnvironmentVariables;
+                bool hadMei = ev.ContainsKey("_MEIPASS2");
+                if (hadMei) ev.Remove("_MEIPASS2");
+                Log("_MEIPASS2 was in env dict: " + hadMei.ToString()
+                    + " | present after remove: " + ev.ContainsKey("_MEIPASS2").ToString());
 
                 Log("Calling Process.Start: " + _target);
-                Process.Start(new ProcessStartInfo(_target) { UseShellExecute = false });
+                Process.Start(psi);
                 Log("Process.Start returned successfully.");
 
                 Thread.Sleep(800);
