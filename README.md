@@ -94,6 +94,14 @@
 
 ## 変更履歴
 
+### v1.2.14
+
+- **バグ修正**: アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題を修正
+  - PyInstaller ブートローダーは `GetTempPathW()` で展開先フォルダを決定するが、古いコードが `AppData\Local\NaroEditor` フォルダを作成していた影響で `TEMP`/`TMP` 環境変数が誤ったパスに設定されていた場合に `_MEI*` フォルダがそこに作られ、起動失敗していた
+  - Python 側の `_launch_updater()` で `env["TEMP"]` と `env["TMP"]` を `%LOCALAPPDATA%\Temp` に明示設定して Updater プロセスに渡すよう変更
+  - C# Updater 側でも `Process.Start` 前に `psi.EnvironmentVariables["TEMP"]` と `psi.EnvironmentVariables["TMP"]` を同パスに設定するよう変更
+  - 不要になった `AppData\Local\NaroEditor` フォルダ作成コード（誤ったコメント付き）を削除
+
 ### v1.2.13
 
 - **バグ修正**: プレビューで短い文章（折り返しが多い場合）のスクロールが途中で終端になる問題を修正

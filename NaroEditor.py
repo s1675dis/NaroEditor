@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.13"
+APP_VERSION = "1.2.14"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -244,11 +244,6 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] {{
 _APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "NaroEditor")
 os.makedirs(_APP_DIR, exist_ok=True)
 _CONFIG_PATH = os.path.join(_APP_DIR, "config.json")
-
-# onefile 展開キャッシュ用ディレクトリを初回起動時に作成する
-# （2回目以降の起動で PyInstaller がここを再利用し高速化される）
-_LOCAL_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", _APP_DIR), "NaroEditor")
-os.makedirs(_LOCAL_APP_DIR, exist_ok=True)
 
 # クラッシュリカバリー用パス
 _RECOVERY_DIR  = os.path.join(_APP_DIR, "recovery")
@@ -3494,6 +3489,16 @@ class NaroEditor(QMainWindow):
         os.environ.pop("_MEIPASS2", None)
         # 大文字小文字を問わず除外（念のための安全策）
         env = {k: v for k, v in os.environ.items() if k.upper() != "_MEIPASS2"}
+        # TEMP/TMP を標準の Windows 一時フォルダに強制設定する。
+        # PyInstaller ブートローダーは GetTempPathW() で展開先を決めるため、
+        # TEMP/TMP が誤ったパス（例: AppData\Local\NaroEditor）になっていると
+        # そこに _MEI* フォルダが作られ、旧 DLL を参照して起動に失敗する。
+        _local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if _local_appdata:
+            _correct_temp = os.path.join(_local_appdata, "Temp")
+            os.makedirs(_correct_temp, exist_ok=True)
+            env["TEMP"] = _correct_temp
+            env["TMP"]  = _correct_temp
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),

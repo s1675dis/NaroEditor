@@ -205,6 +205,10 @@ namespace NaroEditorUpdater
                 // to prevent the child from seeing _MEIPASS2.
                 Log("_MEIPASS2 before launch: "
                     + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
+                Log("TEMP before launch: "
+                    + (Environment.GetEnvironmentVariable("TEMP") ?? "(not set)"));
+                Log("TMP  before launch: "
+                    + (Environment.GetEnvironmentVariable("TMP") ?? "(not set)"));
 
                 // Also clear from this process env as defense-in-depth
                 Environment.SetEnvironmentVariable("_MEIPASS2", null);
@@ -217,6 +221,26 @@ namespace NaroEditorUpdater
                 if (hadMei) ev.Remove("_MEIPASS2");
                 Log("_MEIPASS2 was in env dict: " + hadMei.ToString()
                     + " | present after remove: " + ev.ContainsKey("_MEIPASS2").ToString());
+
+                // Log what TEMP/TMP the new process will receive
+                string tempInDict = ev.ContainsKey("TEMP") ? (string)ev["TEMP"] : "(not in dict)";
+                string tmpInDict  = ev.ContainsKey("TMP")  ? (string)ev["TMP"]  : "(not in dict)";
+                Log("TEMP in env dict: " + tempInDict);
+                Log("TMP  in env dict: " + tmpInDict);
+                // Log total env var count for sanity check
+                Log("Env dict entry count: " + ev.Count.ToString());
+
+                // TEMP/TMP を標準 Windows 一時フォルダに強制設定する。
+                // PyInstaller ブートローダーは GetTempPathW() で展開先を決めるため
+                // TEMP/TMP が誤ったパスになっていると _MEI* フォルダがそこに作られ
+                // 旧 DLL を参照して起動に失敗する。
+                string localAppData = Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData);
+                string correctTemp = System.IO.Path.Combine(localAppData, "Temp");
+                System.IO.Directory.CreateDirectory(correctTemp);
+                ev["TEMP"] = correctTemp;
+                ev["TMP"]  = correctTemp;
+                Log("TEMP forced to: " + correctTemp);
 
                 Log("Calling Process.Start: " + _target);
                 Process.Start(psi);
