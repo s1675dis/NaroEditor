@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.12"
+APP_VERSION = "1.2.13"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -1847,7 +1847,7 @@ class _PreviewScaleView(QGraphicsView):
         self.setBackgroundBrush(self._browser.palette().base())
 
         self._browser.document().documentLayout().documentSizeChanged.connect(
-            self._sync_scene_rect
+            self._on_doc_size_changed
         )
         self._rendering = False
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
@@ -1916,18 +1916,29 @@ class _PreviewScaleView(QGraphicsView):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
-    def _sync_scene_rect(self) -> None:
-        """ブラウザの文書高さに合わせてシーンサイズを更新する。"""
+    def _on_doc_size_changed(self, size) -> None:
+        """documentSizeChanged シグナルハンドラ。実際の文書高さで scene rect を更新する。"""
+        self._sync_scene_rect(float(size.height()))
+
+    def _sync_scene_rect(self, actual_doc_h: float = 0.0) -> None:
+        """ブラウザの文書高さに合わせてシーンサイズを更新する。
+        actual_doc_h が正の値のとき（render_range 後）はその値を使う。
+        ゼロのとき（初期化・スケール変更など）は数式による推定値を使う。
+        推定値は空プレースホルダー状態（折り返しなし）では正確だが、
+        折り返しのある行が多い場合に過小評価になるため、render 後は必ず
+        document().size() の実測値を渡すこと。
+        """
         br = self._browser
-        n  = len(br._line_cache)
-        lh = br._line_height_px
-        if n > 0 and lh > 0:
-            # FixedHeight ブロックの高さは数式で確定できる → Qt の O(N) レイアウト計算を回避
-            # document().size() = _title_height_px + N × lineHeight + frameBottomMargin(40)
-            # +40 は旧実装の document().size() + 40 に合わせたコンテンツ下余白
-            doc_h = br._title_height_px + n * lh + 40.0
+        if actual_doc_h > 0:
+            doc_h = actual_doc_h
         else:
-            doc_h = float(br.document().size().height())
+            n  = len(br._line_cache)
+            lh = br._line_height_px
+            if n > 0 and lh > 0:
+                # 空プレースホルダー時（初回・全再構築直後）の推定値
+                doc_h = br._title_height_px + n * lh + 40.0
+            else:
+                doc_h = float(br.document().size().height())
         min_h = self.viewport().height() / self._scale if self._scale > 0 else doc_h
         h = max(doc_h + 40, min_h)  # +40: コンテンツ末尾に余白を確保（旧実装と同一）
         h_int = int(h)
@@ -1984,7 +1995,11 @@ class _PreviewScaleView(QGraphicsView):
             finally:
                 layout.blockSignals(False)
             if rendered:
-                self._sync_scene_rect()
+                # blockSignals(False) 直後に Qt がレイアウト計算済みの document().size() を
+                # 返すため、折り返し行を含む実際の文書高さを O(1) で取得できる。
+                # この実測値を _sync_scene_rect に渡し、n×lh の過小推定を修正する。
+                actual_h = float(self._browser.document().size().height())
+                self._sync_scene_rect(actual_h)
                 # blockSignals により layout の update(rect) シグナルが抑制されているため
                 # 明示的に再描画を要求する（QGraphicsProxyWidget 経由でも確実に反映）
                 self.scene().update()
