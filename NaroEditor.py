@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.14"
+APP_VERSION = "1.2.15"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3148,6 +3148,9 @@ class NaroEditor(QMainWindow):
                 self._new_tab()
             else:
                 self._remove_pane(pane)
+                self._update_window_title()
+                self._update_status()
+                self._force_preview_update()
 
     def _close_current_tab(self) -> None:
         idx = self._active_pane.currentIndex()
