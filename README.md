@@ -94,6 +94,14 @@
 
 ## 変更履歴
 
+### v1.2.21
+
+- **バグ修正**: 自動アップデート後に `Failed to load python DLL ... python314.dll` で起動できない問題を根本解決
+  - `NaroEditor.spec` の `runtime_tmpdir` を `None` から `'%APPDATA%\NaroEditor\runtime'` に変更
+  - PyInstaller ブートローダーは `%APPDATA%` を `ExpandEnvironmentStringsW` で展開するため、展開先が常に `%APPDATA%\NaroEditor\runtime\_MEI<hash>` に固定される
+  - これにより `TEMP` 環境変数の値に完全に依存しなくなり、プロセス環境汚染の連鎖がどの状態でも DLL 読み込みに影響しなくなる
+  - `_cleanup_mei_cache()`（Python）および `CleanupMeiPass()`（C#）を新しい展開先のスキャンに対応
+
 ### v1.2.20
 
 - **バグ修正**: 自動アップデート後の起動時に `_MEI72042\python314.dll` の読み込みが失敗する問題を根本修正

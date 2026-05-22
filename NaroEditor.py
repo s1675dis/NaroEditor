@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.20"
+APP_VERSION = "1.2.21"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -60,31 +60,34 @@ def _ensure_updater() -> None:
 
 
 def _cleanup_mei_cache() -> None:
-    # %LOCALAPPDATA%/NaroEditor 内の旧 _MEI* 遺物を削除する。
-    # v1.2.13 以前のコードが TEMP 環境変数を AppData\Local\NaroEditor に
-    # 誤設定していたため、そこに _MEI* ディレクトリが残存している。
-    # v1.2.14 で誤設定コードは削除済みだが、残留した _MEI* が PATH に
-    # 引き継がれると DLL 読み込みエラーの原因になるため一度だけ削除する。
     import shutil as _shutil
-    local_appdata = os.environ.get("LOCALAPPDATA", "")
-    if not local_appdata:
-        return
-    cache_dir = os.path.join(local_appdata, "NaroEditor")
-    if not os.path.isdir(cache_dir):
-        return
     current = os.path.normcase(getattr(sys, "_MEIPASS", "").rstrip(os.sep))
-    for name in os.listdir(cache_dir):
-        if not name.startswith("_MEI"):
-            continue
-        path = os.path.join(cache_dir, name)
-        if not os.path.isdir(path):
-            continue
-        if current and os.path.normcase(path) == current:
-            continue
-        try:
-            _shutil.rmtree(path, ignore_errors=True)
-        except Exception:
-            pass
+
+    def _sweep(cache_dir: str) -> None:
+        if not os.path.isdir(cache_dir):
+            return
+        for name in os.listdir(cache_dir):
+            if not name.startswith("_MEI"):
+                continue
+            path = os.path.join(cache_dir, name)
+            if not os.path.isdir(path):
+                continue
+            if current and os.path.normcase(path) == current:
+                continue
+            try:
+                _shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
+
+    # v1.2.21+: 正規の展開先。スペック runtime_tmpdir で固定済み。
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        _sweep(os.path.join(appdata, "NaroEditor", "runtime"))
+
+    # v1.2.13 以前の TEMP 誤設定による遺物（%LOCALAPPDATA%\NaroEditor\_MEI*）を削除。
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata:
+        _sweep(os.path.join(local_appdata, "NaroEditor"))
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette

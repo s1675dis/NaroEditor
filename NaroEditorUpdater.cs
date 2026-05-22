@@ -231,41 +231,44 @@ namespace NaroEditorUpdater
 
         void CleanupMeiPass()
         {
-            // v1.2.13 以前のコードが TEMP を AppData\Local\NaroEditor に誤設定していた
-            // ため、そこに _MEI* ディレクトリが残存している場合がある。残留した _MEI* が
-            // PATH に引き継がれると新 NaroEditor が python314.dll を誤参照して失敗する。
+            // v1.2.21+: 正規展開先 %APPDATA%\NaroEditor\runtime\_MEI* をスキャン。
+            // v1.2.13 以前の遺物: %LOCALAPPDATA%\NaroEditor\_MEI* も引き続きスキャン。
+            SweepMeiDirs(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "NaroEditor", "runtime"));
+            SweepMeiDirs(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NaroEditor"));
+        }
+
+        void SweepMeiDirs(string cacheDir)
+        {
             try
             {
-                string localAppData = Environment.GetFolderPath(
-                    Environment.SpecialFolder.LocalApplicationData);
-                string cacheDir = Path.Combine(localAppData, "NaroEditor");
-                Log("CleanupMeiPass: scanning " + cacheDir);
-
+                Log("SweepMeiDirs: scanning " + cacheDir);
                 if (!Directory.Exists(cacheDir))
                 {
-                    Log("CleanupMeiPass: cache dir does not exist, nothing to clean");
+                    Log("SweepMeiDirs: does not exist, skipping");
                     return;
                 }
-
                 string[] dirs = Directory.GetDirectories(cacheDir, "_MEI*");
-                Log("CleanupMeiPass: found " + dirs.Length + " _MEI* director(ies)");
-
+                Log("SweepMeiDirs: found " + dirs.Length + " _MEI* director(ies)");
                 foreach (string dir in dirs)
                 {
                     try
                     {
                         Directory.Delete(dir, true);
-                        Log("CleanupMeiPass: deleted " + dir);
+                        Log("SweepMeiDirs: deleted " + dir);
                     }
                     catch (Exception ex)
                     {
-                        Log("CleanupMeiPass: failed to delete " + dir + ": " + ex.Message);
+                        Log("SweepMeiDirs: failed to delete " + dir + ": " + ex.Message);
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log("CleanupMeiPass ERROR: " + ex.GetType().Name + ": " + ex.Message);
+                Log("SweepMeiDirs ERROR (" + cacheDir + "): " + ex.GetType().Name + ": " + ex.Message);
             }
         }
     }
