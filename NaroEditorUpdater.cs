@@ -12,6 +12,7 @@
 // <target_path> with <tmp_path> and launches the updated NaroEditor.
 
 using System;
+using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -199,30 +200,23 @@ namespace NaroEditorUpdater
                     }
                 }
 
-                SetStatus("再起動中…", 100);
+                SetStatus("再起動中…", 90);
                 Thread.Sleep(500);
 
                 // 3. Launch updated NaroEditor.
-
-                // CleanupMeiPass 前に _MEI* の存在状況を記録
-                LogMeiSnapshot("before-cleanup");
+                //
+                // 背景: PyInstaller onefile は起動時に _MEI<hash> へ全 DLL を展開する。
+                // Updater が旧 _MEI* を削除してから新 NaroEditor を起動すると、
+                // Windows Defender が展開直後の DLL をリアルタイムスキャンし、
+                // bootloader の LoadLibrary が読み取りロック中に呼ばれて失敗する。
+                //
+                // 対策: CleanupMeiPass で旧 _MEI* を削除後、NaroEditor を起動する。
+                // 1 回目の起動でブートローダーがクラッシュした場合（高速終了）、
+                // AV スキャン完了を待機してから再起動する。
+                // 2 回目以降: _MEI<hash> が既に存在するため展開スキップ → ロック競合なし。
                 CleanupMeiPass();
-                LogMeiSnapshot("after-cleanup");
 
-                // UseShellExecute = true で起動することで、新 NaroEditor は
-                // シェル（Explorer）の環境を引き継ぐ。
-                // シェルの TEMP は常に AppData\Local\Temp であり、v1.2.13 以前の
-                // 誤った TEMP 設定によるプロセス環境汚染の連鎖を完全に断ち切れる。
-                // UseShellExecute = false + EnvironmentVariables では TEMP 汚染が
-                // 引き継がれる経路を塞ぎきれなかった。
-                var psi = new ProcessStartInfo(_target)
-                {
-                    UseShellExecute = true,
-                };
-
-                Log("Calling Process.Start (UseShellExecute=true): " + _target);
-                Process.Start(psi);
-                Log("Process.Start returned successfully.");
+                LaunchWithAvRetry();
 
                 Thread.Sleep(800);
                 BeginInvoke((Action)Close);
@@ -237,6 +231,167 @@ namespace NaroEditorUpdater
             }
         }
 
+        /// <summary>
+        /// NaroEditor を起動し、AV スキャン競合によるブートローダークラッシュを
+        /// 自動リトライで回避する。
+        ///
+        /// PyInstaller onefile は _MEI&lt;hash&gt; が存在する場合は展開をスキップする。
+        /// 1 回目が失敗して _MEI* ディレクトリが残存していれば、
+        /// AV スキャン完了後の 2 回目は展開スキップ → DLL ロード成功となる。
+        /// </summary>
+        void LaunchWithAvRetry()
+        {
+            const int maxAttempts    = 3;
+            const int crashWindowMs  = 6000;   // この時間内に終了 = ブートローダークラッシュ
+            const int avPollInterval = 500;    // AV スキャン完了ポーリング間隔
+            const int avPollTimeout  = 60000;  // AV 完了待ちの最大時間
+
+            // runtime_tmpdir の展開先ディレクトリ（AV スキャン確認に使用）
+            string runtimeDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "NaroEditor", "runtime");
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                Log(string.Format("Launch attempt {0}/{1}: {2}", attempt, maxAttempts, _target));
+
+                // UseShellExecute=false: 確実なプロセスハンドルと環境変数制御のため。
+                // 子プロセスには現プロセスの環境を渡しつつ、_MEIPASS2 と _MEI* PATH を除去。
+                var psi = new ProcessStartInfo(_target)
+                {
+                    UseShellExecute = false,
+                };
+
+                // _MEIPASS2 を除去して bootloader が必ず展開処理を行うようにする
+                if (psi.EnvironmentVariables.ContainsKey("_MEIPASS2"))
+                    psi.EnvironmentVariables.Remove("_MEIPASS2");
+
+                // PATH から _MEI* エントリを除去（旧 DLL が残留している場合の競合防止）
+                if (psi.EnvironmentVariables.ContainsKey("PATH"))
+                {
+                    string original = psi.EnvironmentVariables["PATH"] ?? "";
+                    string[] parts = original.Split(';');
+                    var clean = new System.Collections.Generic.List<string>();
+                    foreach (string p in parts)
+                    {
+                        string basename = Path.GetFileName(p.TrimEnd('\\', '/'));
+                        if (!basename.Contains("_MEI"))
+                            clean.Add(p);
+                    }
+                    psi.EnvironmentVariables["PATH"] = string.Join(";", clean.ToArray());
+                }
+
+                Process proc;
+                try { proc = Process.Start(psi); }
+                catch (Exception ex)
+                {
+                    Log("Process.Start exception: " + ex.Message);
+                    if (attempt >= maxAttempts) throw;
+                    WaitForAvScan(runtimeDir, avPollTimeout, avPollInterval, attempt);
+                    continue;
+                }
+
+                if (proc == null)
+                {
+                    Log("Process.Start returned null.");
+                    if (attempt >= maxAttempts)
+                        throw new InvalidOperationException("Process.Start returned null.");
+                    WaitForAvScan(runtimeDir, avPollTimeout, avPollInterval, attempt);
+                    continue;
+                }
+
+                Log(string.Format("Process started, PID={0}. Watching for {1}s...",
+                    proc.Id, crashWindowMs / 1000));
+
+                bool exitedQuickly = proc.WaitForExit(crashWindowMs);
+
+                if (!exitedQuickly)
+                {
+                    Log(string.Format(
+                        "Process still running after {0}s → launch successful.", crashWindowMs / 1000));
+                    return;
+                }
+
+                int code = proc.ExitCode;
+                Log(string.Format("Process exited quickly, exit code={0}.", code));
+
+                if (code == 0)
+                {
+                    Log("Process exited cleanly (exit code 0).");
+                    return;
+                }
+
+                // 非ゼロ高速終了 = ブートローダークラッシュ（AV スキャン競合が最有力）
+                if (attempt < maxAttempts)
+                {
+                    Log("Bootloader crash detected. Waiting for AV scan to complete...");
+                    WaitForAvScan(runtimeDir, avPollTimeout, avPollInterval, attempt);
+                }
+            }
+
+            Log("WARNING: All launch attempts exhausted. User must start NaroEditor manually.");
+            SetStatus("自動起動に失敗しました。NaroEditor.exe を手動で起動してください。", 0);
+            Thread.Sleep(10000);
+        }
+
+        /// <summary>
+        /// _MEI* ディレクトリ内の Python DLL がアクセス可能になるまで待機する。
+        /// Windows Defender 等の AV スキャナが展開直後の DLL をロックしている間はブロックする。
+        /// </summary>
+        void WaitForAvScan(string runtimeDir, int maxWaitMs, int pollInterval, int attemptNum)
+        {
+            SetStatus(string.Format(
+                "セキュリティソフトのスキャン完了待機中… (試行 {0})", attemptNum), 70);
+
+            int elapsed = 0;
+            string meiDir = null;
+            string targetDll = null;
+
+            Log(string.Format("[AV-WAIT] Polling for DLL access (max {0}s)...", maxWaitMs / 1000));
+
+            while (elapsed < maxWaitMs)
+            {
+                // _MEI* ディレクトリを探す（前回の失敗起動で残存したはず）
+                if (targetDll == null && Directory.Exists(runtimeDir))
+                {
+                    try
+                    {
+                        string[] meiDirs = Directory.GetDirectories(runtimeDir, "_MEI*");
+                        if (meiDirs.Length > 0)
+                        {
+                            meiDir = meiDirs[0];
+                            // python*.dll を探す
+                            string[] dlls = Directory.GetFiles(meiDir, "python*.dll");
+                            if (dlls.Length > 0)
+                                targetDll = dlls[0];
+                        }
+                    }
+                    catch { }
+                }
+
+                if (targetDll != null)
+                {
+                    try
+                    {
+                        // DLL が読み取れれば AV ロック解除済み
+                        using (FileStream fs = File.Open(
+                            targetDll, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        { }
+                        Log(string.Format(
+                            "[AV-WAIT] DLL accessible after {0}ms: {1}", elapsed, targetDll));
+                        Thread.Sleep(500); // ロック解除後の安定待機
+                        return;
+                    }
+                    catch (IOException) { }
+                }
+
+                Thread.Sleep(pollInterval);
+                elapsed += pollInterval;
+            }
+
+            Log(string.Format("[AV-WAIT] Timed out after {0}ms.", maxWaitMs));
+        }
+
         void CleanupMeiPass()
         {
             // v1.2.21+: 正規展開先 %APPDATA%\NaroEditor\runtime\_MEI* をスキャン。
@@ -247,31 +402,6 @@ namespace NaroEditorUpdater
             SweepMeiDirs(Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "NaroEditor"));
-        }
-
-        void LogMeiSnapshot(string label)
-        {
-            // _MEI* が実際にどこに存在するかをログする
-            string[] scanDirs = new string[]
-            {
-                Environment.GetEnvironmentVariable("TEMP") ?? "",
-                Environment.GetEnvironmentVariable("TMP") ?? "",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NaroEditor"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NaroEditor", "runtime"),
-                Path.GetDirectoryName(_target) ?? "",
-            };
-            Log("[SNAPSHOT:" + label + "] scanning _MEI* in known locations");
-            foreach (string dir in scanDirs)
-            {
-                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
-                try
-                {
-                    string[] found = Directory.GetDirectories(dir, "_MEI*");
-                    foreach (string f in found)
-                        Log("[SNAPSHOT:" + label + "] EXISTS: " + f);
-                }
-                catch { }
-            }
         }
 
         void SweepMeiDirs(string cacheDir)
