@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.25"
+APP_VERSION = "1.2.26"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -43,16 +43,18 @@ _UPDATER_PATH = os.path.join(_UPDATER_DIR, _UPDATER_NAME)
 
 
 def _ensure_updater() -> None:
-    """バンドル済み NaroEditorUpdater.exe を AppData へ展開する（frozen 時のみ）。"""
+    """AppData に NaroEditorUpdater.exe がなければバンドル済みを展開する（frozen 時のみ）。
+    既存ファイルは上書きしない。更新時に GitHub 最新版が配置されるため。"""
     if not getattr(sys, "frozen", False):
         return
     _cleanup_mei_cache()
+    if os.path.isfile(_UPDATER_PATH):
+        return
     src = os.path.join(getattr(sys, "_MEIPASS", ""), _UPDATER_NAME)
     if not os.path.isfile(src):
         return
     os.makedirs(_UPDATER_DIR, exist_ok=True)
     try:
-        # サイズ比較は廃止。バージョンアップ時に古いアップデータが残らないよう常に上書き。
         shutil.copy2(src, _UPDATER_PATH)
     except OSError:
         pass
@@ -2526,9 +2528,9 @@ class _SplitOverlay(QWidget):
 # ---------------------------------------------------------------------------
 class _UpdateChecker(QThread):
     """GitHub releases API を非同期で問い合わせ、新バージョンがあれば通知する。"""
-    update_available = pyqtSignal(str, str)  # (latest_version, download_url)
-    no_update        = pyqtSignal()           # 最新バージョン使用中
-    check_error      = pyqtSignal()           # ネットワーク／解析エラー
+    update_available = pyqtSignal(str, str, str)  # (version, naro_url, updater_url)
+    no_update        = pyqtSignal()               # 最新バージョン使用中
+    check_error      = pyqtSignal()               # ネットワーク／解析エラー
 
     def __init__(self, current_version: str, parent=None):
         super().__init__(parent)
@@ -2551,11 +2553,13 @@ class _UpdateChecker(QThread):
                     <= tuple(map(int, self._current.split(".")))):
                 self.no_update.emit()
                 return
-            for asset in data.get("assets", []):
-                if asset.get("name", "").lower().endswith(".exe"):
-                    self.update_available.emit(tag, asset["browser_download_url"])
-                    return
-            self.no_update.emit()  # リリースはあるが EXE アセットなし
+            assets      = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
+            naro_url    = assets.get("NaroEditor.exe", "")
+            updater_url = assets.get("NaroEditorUpdater.exe", "")
+            if not naro_url:
+                self.no_update.emit()  # リリースはあるが NaroEditor.exe アセットなし
+                return
+            self.update_available.emit(tag, naro_url, updater_url)
         except Exception:
             self.check_error.emit()
 
@@ -3449,16 +3453,16 @@ class NaroEditor(QMainWindow):
                 "アップデートの確認に失敗しました。\nネットワーク接続を確認してください。",
             )
 
-        def _on_available(version: str, url: str):
+        def _on_available(version: str, naro_url: str, updater_url: str):
             _restore_action()
-            self._on_update_available(version, url)
+            self._on_update_available(version, naro_url, updater_url)
 
         checker.update_available.connect(_on_available)
         checker.no_update.connect(_on_no_update)
         checker.check_error.connect(_on_error)
         checker.start()
 
-    def _on_update_available(self, version: str, url: str) -> None:
+    def _on_update_available(self, version: str, naro_url: str, updater_url: str) -> None:
         ret = QMessageBox.question(
             self,
             "アップデートの確認",
@@ -3469,7 +3473,7 @@ class NaroEditor(QMainWindow):
         if ret != QMessageBox.StandardButton.Yes:
             return
 
-        if not os.path.isfile(_UPDATER_PATH):
+        if not os.path.isfile(_UPDATER_PATH) and not updater_url:
             QMessageBox.warning(
                 self, "アップデート",
                 "アップデータが見つかりません。\n"
@@ -3477,36 +3481,53 @@ class NaroEditor(QMainWindow):
             )
             return
 
-        tmp = os.path.join(os.path.dirname(sys.executable), f"NaroEditor_{version}_new.exe")
+        tmp_naro = os.path.join(os.path.dirname(sys.executable), f"NaroEditor_{version}_new.exe")
 
-        dlg = QProgressDialog(
-            f"NaroEditor v{version} をダウンロード中…",
-            None,   # キャンセルボタンなし
-            0, 100, self,
-        )
+        dlg = QProgressDialog("", None, 0, 100, self)
         dlg.setWindowTitle("アップデート")
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
         dlg.setValue(0)
 
-        self._dl_thread = _DownloadThread(url, tmp, self)
-
-        def _on_progress(v: int) -> None:
-            dlg.setValue(v)
-
-        def _on_finished(path: str) -> None:
-            dlg.close()
-            self._launch_updater(version, path)
-
         def _on_error(msg: str) -> None:
             dlg.close()
             QMessageBox.critical(self, "アップデート", f"ダウンロードに失敗しました。\n{msg}")
 
-        self._dl_thread.progress.connect(_on_progress)
-        self._dl_thread.finished.connect(_on_finished)
-        self._dl_thread.error.connect(_on_error)
-        self._dl_thread.start()
+        def _start_naro_dl() -> None:
+            dlg.setLabelText(f"NaroEditor v{version} をダウンロード中…")
+            dlg.setValue(0)
+            self._dl_thread = _DownloadThread(naro_url, tmp_naro, self)
+            self._dl_thread.progress.connect(dlg.setValue)
+            self._dl_thread.finished.connect(lambda path: (dlg.close(), self._launch_updater(version, path)))
+            self._dl_thread.error.connect(_on_error)
+            self._dl_thread.start()
+
+        if updater_url:
+            tmp_updater = os.path.join(os.path.dirname(sys.executable), "NaroEditorUpdater_new.exe")
+            dlg.setLabelText("アップデータを更新中…")
+
+            def _on_updater_done(path: str) -> None:
+                try:
+                    os.makedirs(_UPDATER_DIR, exist_ok=True)
+                    shutil.copy2(path, _UPDATER_PATH)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                _start_naro_dl()
+
+            self._updater_dl_thread = _DownloadThread(updater_url, tmp_updater, self)
+            self._updater_dl_thread.progress.connect(dlg.setValue)
+            self._updater_dl_thread.finished.connect(_on_updater_done)
+            self._updater_dl_thread.error.connect(_on_error)
+            self._updater_dl_thread.start()
+        else:
+            _start_naro_dl()
+
         dlg.exec()
 
     def _launch_updater(self, version: str, source: str) -> None:
