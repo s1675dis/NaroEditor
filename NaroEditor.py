@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.16"
+APP_VERSION = "1.2.17"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -46,6 +46,7 @@ def _ensure_updater() -> None:
     """バンドル済み NaroEditorUpdater.exe を AppData へ展開する（frozen 時のみ）。"""
     if not getattr(sys, "frozen", False):
         return
+    _cleanup_mei_cache()
     src = os.path.join(getattr(sys, "_MEIPASS", ""), _UPDATER_NAME)
     if not os.path.isfile(src):
         return
@@ -56,6 +57,34 @@ def _ensure_updater() -> None:
         _shutil.copy2(src, _UPDATER_PATH)
     except OSError:
         pass
+
+
+def _cleanup_mei_cache() -> None:
+    # %LOCALAPPDATA%/NaroEditor 内の旧 _MEI* キャッシュを削除する。
+    # PyInstaller 6.x は onefile EXE の展開先として GetTempPathW() ではなく
+    # %LOCALAPPDATA%/<AppName>/ を永続キャッシュとして使う場合がある。
+    # 自動アップデート後に旧バージョンの _MEI* ディレクトリが残っていると、
+    # 新バージョン起動時に誤参照して DLL 読み込みエラーが発生する。
+    import shutil as _shutil
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if not local_appdata:
+        return
+    cache_dir = os.path.join(local_appdata, "NaroEditor")
+    if not os.path.isdir(cache_dir):
+        return
+    current = os.path.normcase(getattr(sys, "_MEIPASS", "").rstrip(os.sep))
+    for name in os.listdir(cache_dir):
+        if not name.startswith("_MEI"):
+            continue
+        path = os.path.join(cache_dir, name)
+        if not os.path.isdir(path):
+            continue
+        if current and os.path.normcase(path) == current:
+            continue
+        try:
+            _shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # One Dark / Pulsar Night colour palette

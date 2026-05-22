@@ -15,7 +15,6 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -270,45 +269,39 @@ namespace NaroEditorUpdater
 
         void CleanupMeiPass()
         {
+            // %LOCALAPPDATA%\NaroEditor\ 内の _MEI* ディレクトリをすべて削除する。
+            // PyInstaller 6.x はこの場所を永続キャッシュとして使うため、
+            // 旧バージョンの _MEI* が残っていると新 NaroEditor が誤参照して
+            // DLL 読み込みに失敗する。
+            // このメソッドは NaroEditor.exe の終了後に呼ばれるため、
+            // すべての _MEI* ディレクトリを安全に削除できる。
             try
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string configPath = Path.Combine(appData, "NaroEditor", "config.json");
-                if (!File.Exists(configPath)) return;
+                string localAppData = Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData);
+                string cacheDir = Path.Combine(localAppData, "NaroEditor");
+                Log("CleanupMeiPass: scanning " + cacheDir);
 
-                string json = File.ReadAllText(configPath, System.Text.Encoding.UTF8);
-
-                // "_meipass_cleanup" キーの値を単純な正規表現で抽出する
-                // 例: "_meipass_cleanup": "C:\\Users\\GCC\\AppData\\Local\\NaroEditor\\_MEI12345"
-                var m = Regex.Match(json,
-                    @"""_meipass_cleanup""\s*:\s*""((?:[^""\\]|\\.)*)""");
-                if (!m.Success)
+                if (!Directory.Exists(cacheDir))
                 {
-                    Log("CleanupMeiPass: _meipass_cleanup key not found in config.json");
+                    Log("CleanupMeiPass: cache dir does not exist, nothing to clean");
                     return;
                 }
 
-                // JSON のバックスラッシュエスケープを解除する (\\ → \)
-                string rawPath = m.Groups[1].Value.Replace(@"\\", @"\");
-                Log("CleanupMeiPass: meipass_cleanup path = " + rawPath);
+                string[] dirs = Directory.GetDirectories(cacheDir, "_MEI*");
+                Log("CleanupMeiPass: found " + dirs.Length + " _MEI* director(ies)");
 
-                // キーを config.json から削除する
-                string updated = Regex.Replace(json,
-                    @",?\s*""_meipass_cleanup""\s*:\s*""(?:[^""\\]|\\.)*""", "");
-                // 先頭カンマが残った場合を修正する
-                updated = Regex.Replace(updated, @"\{\s*,", "{");
-                File.WriteAllText(configPath, updated, System.Text.Encoding.UTF8);
-                Log("CleanupMeiPass: removed key from config.json");
-
-                // 旧 _MEI* ディレクトリを削除する
-                if (Directory.Exists(rawPath))
+                foreach (string dir in dirs)
                 {
-                    Directory.Delete(rawPath, true);
-                    Log("CleanupMeiPass: deleted " + rawPath);
-                }
-                else
-                {
-                    Log("CleanupMeiPass: path does not exist (already cleaned?): " + rawPath);
+                    try
+                    {
+                        Directory.Delete(dir, true);
+                        Log("CleanupMeiPass: deleted " + dir);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("CleanupMeiPass: failed to delete " + dir + ": " + ex.Message);
+                    }
                 }
             }
             catch (Exception ex)

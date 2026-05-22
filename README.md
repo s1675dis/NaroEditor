@@ -94,6 +94,13 @@
 
 ## 変更履歴
 
+### v1.2.17
+
+- **バグ修正**: 自動アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題を再修正
+  - v1.2.16 の修正（config.json 経由）はアップデーターの入れ替えタイミングの問題で v1.2.15→v1.2.16 の更新には適用されなかった
+  - NaroEditorUpdater が新 NaroEditor.exe を起動する前に `%LOCALAPPDATA%\NaroEditor\_MEI*` ディレクトリをすべてスキャンして削除するよう変更。NaroEditor 終了後に実行されるため全キャッシュを安全に削除できる
+  - NaroEditor 起動時にも同様のクリーンアップを実行するよう追加し、どちらかの経路で必ず旧キャッシュが消去される二重防衛とした
+
 ### v1.2.16
 
 - **バグ修正**: 自動アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題を根本修正
