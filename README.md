@@ -94,6 +94,14 @@
 
 ## 変更履歴
 
+### v1.2.19
+
+- **コード整理**: v1.2.14 以前の廃止仕様に基づくコードを削除
+  - v1.2.14 で修正済みの TEMP/TMP 強制上書きコードを `_launch_updater()` および NaroEditorUpdater から削除（TEMP は常に正常なため不要）
+  - v1.2.16 で廃止した config.json 経由の `_meipass_cleanup` 連携に関する誤ったコメントを削除
+  - 根本原因（PATH 汚染）判明後に不要となった `_MEIPASS2` 診断ログおよび TEMP/TMP 診断ログを NaroEditorUpdater から削除
+  - `_cleanup_mei_cache()` および `CleanupMeiPass()` のコメントを実態に合わせて修正（「PyInstaller 6.x の永続キャッシュ」という誤った説明 → 「v1.2.13 以前の TEMP 誤設定による遺物の一回限りのクリーンアップ」）
+
 ### v1.2.18
 
 - **バグ修正**: 自動アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題の根本原因を特定・修正

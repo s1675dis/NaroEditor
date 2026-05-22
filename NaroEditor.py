@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.18"
+APP_VERSION = "1.2.19"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -60,11 +60,11 @@ def _ensure_updater() -> None:
 
 
 def _cleanup_mei_cache() -> None:
-    # %LOCALAPPDATA%/NaroEditor 内の旧 _MEI* キャッシュを削除する。
-    # PyInstaller 6.x は onefile EXE の展開先として GetTempPathW() ではなく
-    # %LOCALAPPDATA%/<AppName>/ を永続キャッシュとして使う場合がある。
-    # 自動アップデート後に旧バージョンの _MEI* ディレクトリが残っていると、
-    # 新バージョン起動時に誤参照して DLL 読み込みエラーが発生する。
+    # %LOCALAPPDATA%/NaroEditor 内の旧 _MEI* 遺物を削除する。
+    # v1.2.13 以前のコードが TEMP 環境変数を AppData\Local\NaroEditor に
+    # 誤設定していたため、そこに _MEI* ディレクトリが残存している。
+    # v1.2.14 で誤設定コードは削除済みだが、残留した _MEI* が PATH に
+    # 引き継がれると DLL 読み込みエラーの原因になるため一度だけ削除する。
     import shutil as _shutil
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     if not local_appdata:
@@ -3520,12 +3520,6 @@ class NaroEditor(QMainWindow):
         ctypes.windll.kernel32.SetEnvironmentVariableW("_MEIPASS2", None)
         os.environ.pop("_MEIPASS2", None)
         env = {k: v for k, v in os.environ.items() if k.upper() != "_MEIPASS2"}
-        _local_appdata = os.environ.get("LOCALAPPDATA", "")
-        if _local_appdata:
-            _correct_temp = os.path.join(_local_appdata, "Temp")
-            os.makedirs(_correct_temp, exist_ok=True)
-            env["TEMP"] = _correct_temp
-            env["TMP"]  = _correct_temp
         # PyInstaller ブートローダーは展開先ディレクトリを PATH の先頭に追加する。
         # この PATH がアップデータ経由で新 NaroEditor に引き継がれると、
         # Windows が python314.dll を旧 _MEI* から検索して DLL 読み込みエラーが発生する。

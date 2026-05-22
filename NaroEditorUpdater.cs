@@ -229,30 +229,7 @@ namespace NaroEditorUpdater
                 // Accessing EnvironmentVariables populates it from current process env
                 // (StringDictionary; keys stored lowercase, lookups case-insensitive)
                 var ev = psi.EnvironmentVariables;
-                bool hadMei = ev.ContainsKey("_MEIPASS2");
-                if (hadMei) ev.Remove("_MEIPASS2");
-                Log("_MEIPASS2 was in env dict: " + hadMei.ToString()
-                    + " | present after remove: " + ev.ContainsKey("_MEIPASS2").ToString());
-
-                // Log what TEMP/TMP the new process will receive
-                string tempInDict = ev.ContainsKey("TEMP") ? (string)ev["TEMP"] : "(not in dict)";
-                string tmpInDict  = ev.ContainsKey("TMP")  ? (string)ev["TMP"]  : "(not in dict)";
-                Log("TEMP in env dict: " + tempInDict);
-                Log("TMP  in env dict: " + tmpInDict);
-                // Log total env var count for sanity check
-                Log("Env dict entry count: " + ev.Count.ToString());
-
-                // TEMP/TMP を標準 Windows 一時フォルダに強制設定する。
-                // PyInstaller ブートローダーは GetTempPathW() で展開先を決めるため
-                // TEMP/TMP が誤ったパスになっていると _MEI* フォルダがそこに作られ
-                // 旧 DLL を参照して起動に失敗する。
-                string localAppData = Environment.GetFolderPath(
-                    Environment.SpecialFolder.LocalApplicationData);
-                string correctTemp = System.IO.Path.Combine(localAppData, "Temp");
-                System.IO.Directory.CreateDirectory(correctTemp);
-                ev["TEMP"] = correctTemp;
-                ev["TMP"]  = correctTemp;
-                Log("TEMP forced to: " + correctTemp);
+                if (ev.ContainsKey("_MEIPASS2")) ev.Remove("_MEIPASS2");
 
                 // env dict 内の PATH からも _MEI* エントリを除去する
                 if (ev.ContainsKey("PATH"))
@@ -265,12 +242,7 @@ namespace NaroEditorUpdater
                     Log("env PATH cleaned (removed _MEI* entries)");
                 }
 
-                // config.json から旧 _MEI* 展開ディレクトリのパスを読み取り削除する。
-                // PyInstaller 6.x は TEMP/TMP に関わらず独自のキャッシュ場所に
-                // 展開ディレクトリを作るため、環境変数での制御は効かない。
-                // NaroEditor 側が終了前に "_meipass_cleanup" キーへパスを書き込み、
-                // ここで読んで削除することで新 NaroEditor の起動時に旧キャッシュが
-                // 参照されなくなる。
+                // v1.2.13 以前に AppData\Local\NaroEditor に残った _MEI* 遺物を削除する
                 CleanupMeiPass();
 
                 Log("Calling Process.Start: " + _target);
@@ -292,12 +264,9 @@ namespace NaroEditorUpdater
 
         void CleanupMeiPass()
         {
-            // %LOCALAPPDATA%\NaroEditor\ 内の _MEI* ディレクトリをすべて削除する。
-            // PyInstaller 6.x はこの場所を永続キャッシュとして使うため、
-            // 旧バージョンの _MEI* が残っていると新 NaroEditor が誤参照して
-            // DLL 読み込みに失敗する。
-            // このメソッドは NaroEditor.exe の終了後に呼ばれるため、
-            // すべての _MEI* ディレクトリを安全に削除できる。
+            // v1.2.13 以前のコードが TEMP を AppData\Local\NaroEditor に誤設定していた
+            // ため、そこに _MEI* ディレクトリが残存している場合がある。残留した _MEI* が
+            // PATH に引き継がれると新 NaroEditor が python314.dll を誤参照して失敗する。
             try
             {
                 string localAppData = Environment.GetFolderPath(
