@@ -94,6 +94,13 @@
 
 ## 変更履歴
 
+### v1.2.18
+
+- **バグ修正**: 自動アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題の根本原因を特定・修正
+  - 根本原因: PyInstaller ブートローダーは起動時に展開先ディレクトリ（`_MEI*`）を `PATH` 環境変数の先頭に追加する。この変更済みの `PATH` がアップデーター経由で新 NaroEditor に引き継がれることで、新バージョン起動時に Windows が旧 `_MEI*` から `python314.dll` を検索し読み込みに失敗していた
+  - `_launch_updater()` でアップデーター起動前に `PATH` から `_MEI*` を含むエントリをすべて除去するよう変更
+  - NaroEditorUpdater でも新 NaroEditor 起動前に同様の `PATH` クリーンアップを実行するよう追加
+
 ### v1.2.17
 
 - **バグ修正**: 自動アップデート後の起動時に `AppData\Local\NaroEditor\_MEI*\python314.dll` の読み込みが失敗する問題を再修正

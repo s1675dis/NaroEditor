@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.17"
+APP_VERSION = "1.2.18"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3526,14 +3526,14 @@ class NaroEditor(QMainWindow):
             os.makedirs(_correct_temp, exist_ok=True)
             env["TEMP"] = _correct_temp
             env["TMP"]  = _correct_temp
-        # 現在の PyInstaller 展開ディレクトリを config.json に書き込む。
-        # アップデータがこのパスを読んで旧 _MEI* ディレクトリを削除するため、
-        # 新 NaroEditor.exe が起動時に旧キャッシュを参照して DLL 読み込みに
-        # 失敗する問題を環境変数に頼らず確実に解消できる。
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            cfg = _load_cfg()
-            cfg["_meipass_cleanup"] = sys._MEIPASS
-            _save_cfg(cfg)
+        # PyInstaller ブートローダーは展開先ディレクトリを PATH の先頭に追加する。
+        # この PATH がアップデータ経由で新 NaroEditor に引き継がれると、
+        # Windows が python314.dll を旧 _MEI* から検索して DLL 読み込みエラーが発生する。
+        # _MEI* を含むすべてのパスエントリを PATH から除去する。
+        if "PATH" in env:
+            _clean = [p for p in env["PATH"].split(os.pathsep)
+                      if "_MEI" not in os.path.basename(p.rstrip("/\\"))]
+            env["PATH"] = os.pathsep.join(_clean)
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),

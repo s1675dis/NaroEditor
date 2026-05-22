@@ -213,6 +213,18 @@ namespace NaroEditorUpdater
                 // Also clear from this process env as defense-in-depth
                 Environment.SetEnvironmentVariable("_MEIPASS2", null);
 
+                // PATH から _MEI* エントリを除去する。
+                // PyInstaller ブートローダーは展開先を PATH 先頭に追加するため、
+                // 旧バージョンの _MEI* が PATH に残ったまま引き継がれると
+                // 新 NaroEditor 起動時に Windows が旧 _MEI* から python314.dll を
+                // 探して DLL 読み込みエラーが発生する。
+                string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+                string cleanedPath = string.Join(";", System.Array.FindAll(
+                    currentPath.Split(';'),
+                    p => p.IndexOf("_MEI", StringComparison.OrdinalIgnoreCase) < 0));
+                Environment.SetEnvironmentVariable("PATH", cleanedPath);
+                Log("PATH cleaned (removed _MEI* entries)");
+
                 var psi = new ProcessStartInfo(_target) { UseShellExecute = false };
                 // Accessing EnvironmentVariables populates it from current process env
                 // (StringDictionary; keys stored lowercase, lookups case-insensitive)
@@ -241,6 +253,17 @@ namespace NaroEditorUpdater
                 ev["TEMP"] = correctTemp;
                 ev["TMP"]  = correctTemp;
                 Log("TEMP forced to: " + correctTemp);
+
+                // env dict 内の PATH からも _MEI* エントリを除去する
+                if (ev.ContainsKey("PATH"))
+                {
+                    string evPath = (string)ev["PATH"];
+                    string evCleaned = string.Join(";", System.Array.FindAll(
+                        evPath.Split(';'),
+                        p => p.IndexOf("_MEI", StringComparison.OrdinalIgnoreCase) < 0));
+                    ev["PATH"] = evCleaned;
+                    Log("env PATH cleaned (removed _MEI* entries)");
+                }
 
                 // config.json から旧 _MEI* 展開ディレクトリのパスを読み取り削除する。
                 // PyInstaller 6.x は TEMP/TMP に関わらず独自のキャッシュ場所に
