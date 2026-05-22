@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.15"
+APP_VERSION = "1.2.16"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3490,18 +3490,21 @@ class NaroEditor(QMainWindow):
         # これにより新 NaroEditor.exe が旧 _MEI* フォルダを参照する問題を確実に防ぐ。
         ctypes.windll.kernel32.SetEnvironmentVariableW("_MEIPASS2", None)
         os.environ.pop("_MEIPASS2", None)
-        # 大文字小文字を問わず除外（念のための安全策）
         env = {k: v for k, v in os.environ.items() if k.upper() != "_MEIPASS2"}
-        # TEMP/TMP を標準の Windows 一時フォルダに強制設定する。
-        # PyInstaller ブートローダーは GetTempPathW() で展開先を決めるため、
-        # TEMP/TMP が誤ったパス（例: AppData\Local\NaroEditor）になっていると
-        # そこに _MEI* フォルダが作られ、旧 DLL を参照して起動に失敗する。
         _local_appdata = os.environ.get("LOCALAPPDATA", "")
         if _local_appdata:
             _correct_temp = os.path.join(_local_appdata, "Temp")
             os.makedirs(_correct_temp, exist_ok=True)
             env["TEMP"] = _correct_temp
             env["TMP"]  = _correct_temp
+        # 現在の PyInstaller 展開ディレクトリを config.json に書き込む。
+        # アップデータがこのパスを読んで旧 _MEI* ディレクトリを削除するため、
+        # 新 NaroEditor.exe が起動時に旧キャッシュを参照して DLL 読み込みに
+        # 失敗する問題を環境変数に頼らず確実に解消できる。
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            cfg = _load_cfg()
+            cfg["_meipass_cleanup"] = sys._MEIPASS
+            _save_cfg(cfg)
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),
