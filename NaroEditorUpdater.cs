@@ -196,56 +196,23 @@ namespace NaroEditorUpdater
                 SetStatus("再起動中…", 100);
                 Thread.Sleep(500);
 
-                // 3. Launch updated NaroEditor without PyInstaller env vars.
-                //
-                // Strategy: build an EXPLICIT environment dictionary for ProcessStartInfo
-                // (triggering lpEnvironment != NULL in CreateProcess) and remove _MEIPASS2
-                // from it.  Using lpEnvironment=NULL (inheritance) proved unreliable even
-                // after SetEnvironmentVariable; an explicit dict is the only guaranteed way
-                // to prevent the child from seeing _MEIPASS2.
-                Log("_MEIPASS2 before launch: "
-                    + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
-                Log("TEMP before launch: "
-                    + (Environment.GetEnvironmentVariable("TEMP") ?? "(not set)"));
-                Log("TMP  before launch: "
-                    + (Environment.GetEnvironmentVariable("TMP") ?? "(not set)"));
-
-                // Also clear from this process env as defense-in-depth
-                Environment.SetEnvironmentVariable("_MEIPASS2", null);
-
-                // PATH から _MEI* エントリを除去する。
-                // PyInstaller ブートローダーは展開先を PATH 先頭に追加するため、
-                // 旧バージョンの _MEI* が PATH に残ったまま引き継がれると
-                // 新 NaroEditor 起動時に Windows が旧 _MEI* から python314.dll を
-                // 探して DLL 読み込みエラーが発生する。
-                string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-                string cleanedPath = string.Join(";", System.Array.FindAll(
-                    currentPath.Split(';'),
-                    p => p.IndexOf("_MEI", StringComparison.OrdinalIgnoreCase) < 0));
-                Environment.SetEnvironmentVariable("PATH", cleanedPath);
-                Log("PATH cleaned (removed _MEI* entries)");
-
-                var psi = new ProcessStartInfo(_target) { UseShellExecute = false };
-                // Accessing EnvironmentVariables populates it from current process env
-                // (StringDictionary; keys stored lowercase, lookups case-insensitive)
-                var ev = psi.EnvironmentVariables;
-                if (ev.ContainsKey("_MEIPASS2")) ev.Remove("_MEIPASS2");
-
-                // env dict 内の PATH からも _MEI* エントリを除去する
-                if (ev.ContainsKey("PATH"))
-                {
-                    string evPath = (string)ev["PATH"];
-                    string evCleaned = string.Join(";", System.Array.FindAll(
-                        evPath.Split(';'),
-                        p => p.IndexOf("_MEI", StringComparison.OrdinalIgnoreCase) < 0));
-                    ev["PATH"] = evCleaned;
-                    Log("env PATH cleaned (removed _MEI* entries)");
-                }
+                // 3. Launch updated NaroEditor.
 
                 // v1.2.13 以前に AppData\Local\NaroEditor に残った _MEI* 遺物を削除する
                 CleanupMeiPass();
 
-                Log("Calling Process.Start: " + _target);
+                // UseShellExecute = true で起動することで、新 NaroEditor は
+                // シェル（Explorer）の環境を引き継ぐ。
+                // シェルの TEMP は常に AppData\Local\Temp であり、v1.2.13 以前の
+                // 誤った TEMP 設定によるプロセス環境汚染の連鎖を完全に断ち切れる。
+                // UseShellExecute = false + EnvironmentVariables では TEMP 汚染が
+                // 引き継がれる経路を塞ぎきれなかった。
+                var psi = new ProcessStartInfo(_target)
+                {
+                    UseShellExecute = true,
+                };
+
+                Log("Calling Process.Start (UseShellExecute=true): " + _target);
                 Process.Start(psi);
                 Log("Process.Start returned successfully.");
 

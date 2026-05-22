@@ -94,6 +94,12 @@
 
 ## 変更履歴
 
+### v1.2.20
+
+- **バグ修正**: 自動アップデート後の起動時に `_MEI72042\python314.dll` の読み込みが失敗する問題を根本修正
+  - **根本原因の特定**: v1.2.13 以前のコードが `TEMP` 環境変数を `AppData\Local\NaroEditor` に誤設定していた。この値がプロセス環境変数の連鎖を通じて引き継がれ続けていた。`GetTempPathW()` が `AppData\Local\NaroEditor` を返すため PyInstaller ブートローダーの展開先が `AppData\Local\NaroEditor\_MEI72042` になり、そこにある古い DLL を参照して失敗していた
+  - NaroEditorUpdater が新 NaroEditor を起動する際に `UseShellExecute = true` を使用するよう変更。シェル（Explorer）の環境を引き継ぐため `TEMP` は常に正常な `AppData\Local\Temp` となり、旧プロセスからの環境汚染の連鎖を完全に断ち切る
+
 ### v1.2.19
 
 - **コード整理**: v1.2.14 以前の廃止仕様に基づくコードを削除
