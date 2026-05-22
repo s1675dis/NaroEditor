@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.24"
+APP_VERSION = "1.2.25"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3512,22 +3512,8 @@ class NaroEditor(QMainWindow):
     def _launch_updater(self, version: str, source: str) -> None:
         """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
         import subprocess
-        # _MEIPASS2 を 3 段階で確実に除去する:
-        #   1. Win32 環境ブロック (SetEnvironmentVariableW) — PyInstaller が設定した本体
-        #   2. CRT 環境 (os.environ.pop) — Python が管理するコピー
-        #   3. Popen の env= 引数 — ブロック構築に使う辞書
-        # これにより新 NaroEditor.exe が旧 _MEI* フォルダを参照する問題を確実に防ぐ。
-        ctypes.windll.kernel32.SetEnvironmentVariableW("_MEIPASS2", None)
-        os.environ.pop("_MEIPASS2", None)
-        env = {k: v for k, v in os.environ.items() if k.upper() != "_MEIPASS2"}
-        # PyInstaller ブートローダーは展開先ディレクトリを PATH の先頭に追加する。
-        # この PATH がアップデータ経由で新 NaroEditor に引き継がれると、
-        # Windows が python314.dll を旧 _MEI* から検索して DLL 読み込みエラーが発生する。
-        # _MEI* を含むすべてのパスエントリを PATH から除去する。
-        if "PATH" in env:
-            _clean = [p for p in env["PATH"].split(os.pathsep)
-                      if "_MEI" not in os.path.basename(p.rstrip("/\\"))]
-            env["PATH"] = os.pathsep.join(_clean)
+        env = os.environ.copy()
+        env.pop("_MEIPASS2", None)
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),
