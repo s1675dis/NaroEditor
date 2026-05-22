@@ -94,6 +94,10 @@
 
 ## 変更履歴
 
+### v1.2.22
+
+- **診断**: アップデーター起動時の環境変数（TEMP/APPDATA/_MEIPASS2）と NaroEditor.exe パスをログに記録するよう変更。DLL 読み込みエラーの根本原因を特定するため
+
 ### v1.2.21
 
 - **バグ修正**: 自動アップデート後に `Failed to load python DLL ... python314.dll` で起動できない問題を根本解決

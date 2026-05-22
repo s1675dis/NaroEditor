@@ -151,8 +151,14 @@ namespace NaroEditorUpdater
             {
                 Log("=== NaroEditorUpdater started, PID=" + Process.GetCurrentProcess().Id
                     + ", target=" + _target);
-                Log("_MEIPASS2 at startup: "
-                    + (Environment.GetEnvironmentVariable("_MEIPASS2") ?? "(not set)"));
+                // 診断ログ: 環境変数と NaroEditor.exe の場所を記録
+                Log("[DIAG] TEMP="      + (Environment.GetEnvironmentVariable("TEMP")         ?? "(not set)"));
+                Log("[DIAG] TMP="       + (Environment.GetEnvironmentVariable("TMP")          ?? "(not set)"));
+                Log("[DIAG] APPDATA="   + (Environment.GetEnvironmentVariable("APPDATA")      ?? "(not set)"));
+                Log("[DIAG] LOCALAPPDATA=" + (Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? "(not set)"));
+                Log("[DIAG] _MEIPASS2=" + (Environment.GetEnvironmentVariable("_MEIPASS2")    ?? "(not set)"));
+                Log("[DIAG] target path=" + _target);
+                Log("[DIAG] target dir=" + Path.GetDirectoryName(_target));
 
                 // 1. Wait for NaroEditor to fully exit
                 if (_pid > 0)
@@ -198,8 +204,10 @@ namespace NaroEditorUpdater
 
                 // 3. Launch updated NaroEditor.
 
-                // v1.2.13 以前に AppData\Local\NaroEditor に残った _MEI* 遺物を削除する
+                // CleanupMeiPass 前に _MEI* の存在状況を記録
+                LogMeiSnapshot("before-cleanup");
                 CleanupMeiPass();
+                LogMeiSnapshot("after-cleanup");
 
                 // UseShellExecute = true で起動することで、新 NaroEditor は
                 // シェル（Explorer）の環境を引き継ぐ。
@@ -239,6 +247,31 @@ namespace NaroEditorUpdater
             SweepMeiDirs(Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "NaroEditor"));
+        }
+
+        void LogMeiSnapshot(string label)
+        {
+            // _MEI* が実際にどこに存在するかをログする
+            string[] scanDirs = new string[]
+            {
+                Environment.GetEnvironmentVariable("TEMP") ?? "",
+                Environment.GetEnvironmentVariable("TMP") ?? "",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NaroEditor"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NaroEditor", "runtime"),
+                Path.GetDirectoryName(_target) ?? "",
+            };
+            Log("[SNAPSHOT:" + label + "] scanning _MEI* in known locations");
+            foreach (string dir in scanDirs)
+            {
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                try
+                {
+                    string[] found = Directory.GetDirectories(dir, "_MEI*");
+                    foreach (string f in found)
+                        Log("[SNAPSHOT:" + label + "] EXISTS: " + f);
+                }
+                catch { }
+            }
         }
 
         void SweepMeiDirs(string cacheDir)
