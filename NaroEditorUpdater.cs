@@ -43,7 +43,13 @@ namespace NaroEditorUpdater
                 }
             }
 
-            if (source == "" || target == "")
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            int pidInt = 0;
+            int.TryParse(pid, out pidInt);
+
+            if (source == "" || target == "" || pidInt == 0)
             {
                 MessageBox.Show(
                     "引数が不足しています。",
@@ -52,12 +58,6 @@ namespace NaroEditorUpdater
                     MessageBoxIcon.Error);
                 return;
             }
-
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-
-            int pidInt = 0;
-            int.TryParse(pid, out pidInt);
             Application.Run(new UpdaterForm(pidInt, source, target, version));
         }
     }
@@ -183,12 +183,20 @@ namespace NaroEditorUpdater
 
                 // 2. Replace target with downloaded file (retry for file locks)
                 Log("Replacing: " + _source + " -> " + _target);
+                string _backup = _target + ".bak";
                 for (int i = 0; i < 5; i++)
                 {
                     try
                     {
-                        if (File.Exists(_target)) File.Delete(_target);
-                        File.Move(_source, _target);
+                        if (File.Exists(_target))
+                        {
+                            File.Replace(_source, _target, _backup, true);
+                            try { if (File.Exists(_backup)) File.Delete(_backup); } catch { }
+                        }
+                        else
+                        {
+                            File.Move(_source, _target);
+                        }
                         Log("File replaced successfully on attempt " + (i + 1) + ".");
                         break;
                     }
@@ -226,6 +234,7 @@ namespace NaroEditorUpdater
                 Log("EXCEPTION: " + ex.GetType().Name + ": " + ex.Message
                     + "\r\n" + ex.StackTrace);
                 SetStatus(string.Format("エラー: {0}", ex.Message), 0);
+                try { if (File.Exists(_source)) File.Delete(_source); } catch { }
                 Thread.Sleep(8000);
                 BeginInvoke((Action)Close);
             }

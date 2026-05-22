@@ -24,16 +24,16 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QProgressDialog,
 )
 from PyQt6.QtCore import Qt, QRect, QRectF, QSize, QModelIndex, pyqtSignal, QTimer, QPoint, QEvent, QByteArray, QFileSystemWatcher, QObject, QSizeF, QPointF, QThread
-from PyQt6.QtGui import QTransform
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QFontMetricsF, QPainter, QColor, QTextCursor, QKeySequence,
     QTextOption, QStandardItemModel, QStandardItem,
     QTextFormat, QTextFrameFormat, QTextCharFormat, QTextBlockFormat,
     QTextObjectInterface, QPalette, QPen, QPolygon, QCursor, QPixmap, QIcon,
+    QTransform,
 )
 
 
-APP_VERSION = "1.2.23"
+APP_VERSION = "1.2.24"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -53,14 +53,12 @@ def _ensure_updater() -> None:
     os.makedirs(_UPDATER_DIR, exist_ok=True)
     try:
         # サイズ比較は廃止。バージョンアップ時に古いアップデータが残らないよう常に上書き。
-        import shutil as _shutil
-        _shutil.copy2(src, _UPDATER_PATH)
+        shutil.copy2(src, _UPDATER_PATH)
     except OSError:
         pass
 
 
 def _cleanup_mei_cache() -> None:
-    import shutil as _shutil
     current = os.path.normcase(getattr(sys, "_MEIPASS", "").rstrip(os.sep))
 
     def _sweep(cache_dir: str) -> None:
@@ -75,7 +73,7 @@ def _cleanup_mei_cache() -> None:
             if current and os.path.normcase(path) == current:
                 continue
             try:
-                _shutil.rmtree(path, ignore_errors=True)
+                shutil.rmtree(path, ignore_errors=True)
             except Exception:
                 pass
 
@@ -2544,8 +2542,7 @@ class _UpdateChecker(QThread):
                 headers={"User-Agent": f"NaroEditor/{self._current}"},
             )
             with _ur.urlopen(req, timeout=10) as resp:
-                import json as _json
-                data = _json.loads(resp.read().decode())
+                data = json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("vV")
             if not tag:
                 self.no_update.emit()
@@ -2639,6 +2636,7 @@ class NaroEditor(QMainWindow):
         self._preview_update_timer.setSingleShot(True)
         self._preview_update_timer.timeout.connect(self._do_preview_update)
         self._preview_editor_block_count: int = 0
+        self._preview_dirty_lines: dict[int, str] | None = None
         # クラッシュ判定はロックファイル作成より前に行う
         self._prev_crashed = os.path.isfile(_LOCK_PATH)
         try:
@@ -3479,8 +3477,7 @@ class NaroEditor(QMainWindow):
             )
             return
 
-        import tempfile
-        tmp = os.path.join(tempfile.gettempdir(), f"NaroEditor_{version}_new.exe")
+        tmp = os.path.join(os.path.dirname(sys.executable), f"NaroEditor_{version}_new.exe")
 
         dlg = QProgressDialog(
             f"NaroEditor v{version} をダウンロード中…",
@@ -3732,17 +3729,30 @@ class NaroEditor(QMainWindow):
 
     def _on_editor_change(self, ed: "CodeEditor",
                           pos: int, removed: int, added: int) -> None:
-        """行数が変化した（改行・行削除）なら即時、文字入力のみなら 2 秒後にプレビューを更新する。"""
+        """行数が変化した（改行・行削除）なら即時全再構築、文字入力のみなら差分更新を 300ms デバウンスで行う。"""
         if ed is not self._editor:
             return
         new_count = ed.document().blockCount()
         block_changed = (new_count != self._preview_editor_block_count)
         self._preview_editor_block_count = new_count
-        # 改行・行削除は即時反映、文字入力のみは 300ms デバウンス
-        self._preview_update_timer.start(0 if block_changed else 300)
+        if block_changed:
+            self._preview_dirty_lines = None
+            self._preview_update_timer.start(0)
+        else:
+            doc = ed.document()
+            start_blk = doc.findBlock(pos)
+            end_blk   = doc.findBlock(pos + max(added, 1) - 1)
+            if self._preview_dirty_lines is None:
+                self._preview_dirty_lines = {}
+            blk = start_blk
+            while blk.isValid() and blk.blockNumber() <= end_blk.blockNumber():
+                self._preview_dirty_lines[blk.blockNumber()] = blk.text()
+                blk = blk.next()
+            self._preview_update_timer.start(300)
 
     def _force_preview_update(self) -> None:
         """強制的に全再構築でプレビューを更新する（タブ切替・テーマ変更等）。"""
+        self._preview_dirty_lines = None
         self._do_preview_update()
 
     def _get_preview_title(self, cur: "CodeEditor") -> str:
@@ -3761,6 +3771,13 @@ class NaroEditor(QMainWindow):
         if cur is None:
             return
         title = self._get_preview_title(cur)
+        dirty = self._preview_dirty_lines
+        self._preview_dirty_lines = None
+        if dirty is not None:
+            needs_rebuild = target.update_dirty_lines(dirty, title)
+            if not needs_rebuild:
+                self._preview_editor_block_count = cur.document().blockCount()
+                return
         target.set_content(cur.toPlainText(), title)
         self._preview_editor_block_count = cur.document().blockCount()
 
@@ -4221,7 +4238,7 @@ class NaroEditor(QMainWindow):
 
 <h2>👁 プレビュー</h2>
 <ul>
-<li><code>Ctrl+Shift+P</code> でMarkdownプレビューを表示/非表示</li>
+<li><code>Ctrl+Shift+P</code> でプレビュー（なろう・カクヨム・Pixiv形式）を表示/非表示</li>
 <li>プレビューをドッキングするとエディタ右側に常時表示</li>
 <li>アクティブなタブの内容がリアルタイムで反映される</li>
 </ul>
