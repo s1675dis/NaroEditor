@@ -33,11 +33,11 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.26"
+APP_VERSION = "1.2.27"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
-_UPDATER_DIR  = os.path.join(os.environ.get("APPDATA", ""), "NaroEditor")
+_UPDATER_DIR  = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "NaroEditor")
 _UPDATER_NAME = "NaroEditorUpdater.exe"
 _UPDATER_PATH = os.path.join(_UPDATER_DIR, _UPDATER_NAME)
 
@@ -527,7 +527,7 @@ _THEMES: dict[str, dict] = {
     },
 }
 _THEME_ORDER = ["narou", "kakuyomu", "pixiv_mincho", "pixiv_gothic", "fanbox"]
-_PREVIEW_MIN_W = 880
+_PREVIEW_MIN_W = 880  # max(content_w across themes) == 680; +200 for side margins
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +676,13 @@ class SearchReplaceDialog(QDialog):
             f"{count} 件置換しました" if count else "対象が見つかりませんでした",
             ok=bool(count),
         )
+
+    def set_editor(self, editor: QPlainTextEdit) -> None:
+        """アクティブエディタが切り替わった時にターゲットを更新する。"""
+        self._editor = editor
+        self._matches = []
+        self._current = -1
+        self._set_status("")
 
 
 # ---------------------------------------------------------------------------
@@ -997,10 +1004,10 @@ class FileTreePanel(QWidget):
     file_opened  = pyqtSignal(str)
     file_renamed = pyqtSignal(str, str)   # old_path, new_path
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, lock_mgr: "FileLockManager | None" = None):
         super().__init__(parent)
         self._root_paths: list[str] = []
-        self._lock_mgr: "FileLockManager | None" = None
+        self._lock_mgr: "FileLockManager | None" = lock_mgr
         self._restoring = False
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._on_dir_changed)
@@ -1148,10 +1155,14 @@ class FileTreePanel(QWidget):
         item.setForeground(QColor(C["accent"]))
         parent.appendRow(item)
         if self._has_children(path):
-            dummy = QStandardItem("")
-            dummy.setData("__dummy__", Qt.ItemDataRole.UserRole)
-            dummy.setEditable(False)
-            item.appendRow(dummy)
+            item.appendRow(self._make_dummy_item())
+
+    @staticmethod
+    def _make_dummy_item() -> "QStandardItem":
+        dummy = QStandardItem("")
+        dummy.setData("__dummy__", Qt.ItemDataRole.UserRole)
+        dummy.setEditable(False)
+        return dummy
 
     @staticmethod
     def _has_children(path: str) -> bool:
@@ -1257,10 +1268,7 @@ class FileTreePanel(QWidget):
             else:
                 has = self._has_children(norm_path)
                 if has and item.rowCount() == 0:
-                    dummy = QStandardItem("")
-                    dummy.setData("__dummy__", Qt.ItemDataRole.UserRole)
-                    dummy.setEditable(False)
-                    item.appendRow(dummy)
+                    item.appendRow(self._make_dummy_item())
                 elif not has and item.rowCount() > 0:
                     item.removeRows(0, item.rowCount())
 
@@ -1364,10 +1372,7 @@ class FileTreePanel(QWidget):
                 pass
             self._tree.setExpanded(idx, True)
         elif self._has_children(path):
-            dummy = QStandardItem("")
-            dummy.setData("__dummy__", Qt.ItemDataRole.UserRole)
-            dummy.setEditable(False)
-            item.appendRow(dummy)
+            item.appendRow(self._make_dummy_item())
 
     def _new_folder(self, parent_path: str, parent_item: QStandardItem) -> None:
         name, ok = QInputDialog.getText(self, "新規フォルダ", "フォルダ名:")
@@ -1525,6 +1530,25 @@ class PreviewBrowser(QTextBrowser):
         self._title_height_px: float = 0.0
         # _apply_margins のキャッシュ（同マージンで setFrameFormat を呼ばないため）
         self._margin_side_cache: int | None = None
+
+    # ------------------------------------------------------------------
+    # Read-only accessors for _PreviewScaleView / PreviewPane
+    # ------------------------------------------------------------------
+    @property
+    def line_count(self) -> int:
+        return len(self._line_cache)
+
+    @property
+    def line_height_px(self) -> float:
+        return self._line_height_px
+
+    @property
+    def title_height_px(self) -> float:
+        return self._title_height_px
+
+    def title_matches(self, title: str) -> bool:
+        """差分更新の前提確認: タイトルキャッシュと一致するか。"""
+        return title == self._title_cache
 
     def set_theme(self, theme_id: str) -> None:
         self._theme = _THEMES.get(theme_id, _THEMES["narou"])
@@ -1959,11 +1983,11 @@ class _PreviewScaleView(QGraphicsView):
         if actual_doc_h > 0:
             doc_h = actual_doc_h
         else:
-            n  = len(br._line_cache)
-            lh = br._line_height_px
+            n  = br.line_count
+            lh = br.line_height_px
             if n > 0 and lh > 0:
                 # 空プレースホルダー時（初回・全再構築直後）の推定値
-                doc_h = br._title_height_px + n * lh + 40.0
+                doc_h = br.title_height_px + n * lh + 40.0
             else:
                 doc_h = float(br.document().size().height())
         min_h = self.viewport().height() / self._scale if self._scale > 0 else doc_h
@@ -1993,15 +2017,15 @@ class _PreviewScaleView(QGraphicsView):
     def _visible_line_range(self) -> tuple[int, int]:
         """現在の表示範囲 ±2倍バッファに対応する行番号範囲を返す。"""
         br = self._browser
-        n = len(br._line_cache)
-        if n == 0 or br._line_height_px <= 0:
+        n = br.line_count
+        if n == 0 or br.line_height_px <= 0:
             return (0, -1)
         # QGraphicsView のスクロール値はビューポートピクセル座標 → スケールで割ってシーン座標に変換
         doc_top = float(self.verticalScrollBar().value()) / max(self._scale, 0.01)
         doc_vis = self.viewport().height() / max(self._scale, 0.01)
         buffer  = doc_vis * 2.0
-        title_h = br._title_height_px
-        lh      = br._line_height_px
+        title_h = br.title_height_px
+        lh      = br.line_height_px
         first = max(0, int((doc_top - buffer - title_h) / lh))
         last  = min(n - 1, int((doc_top + doc_vis + buffer - title_h) / lh) + 1)
         return (first, last)
@@ -2079,7 +2103,7 @@ class PreviewPane(QWidget):
     def update_dirty_lines(self, dirty: dict[int, str], title: str) -> bool:
         """差分行のみ更新する。タイトル変化・キャッシュ不整合なら True（全再構築要）を返す。"""
         browser = self._view.browser
-        if title != browser._title_cache:
+        if not browser.title_matches(title):
             return True
         return self._view.update_dirty_lines(dirty)
 
@@ -2314,7 +2338,7 @@ class PreviewPane(QWidget):
             self._scroll_accum = 0.0
             return
         dist = abs(dy) - dead
-        speed = min((dist ** 1.5) * 4.5, 4500.0)
+        speed = min((dist ** 1.5) * 4.5, 4500.0)  # QGraphicsView uses px; 4.5 = 0.15 * ~30px/step
         self._scroll_accum += speed * dt * (1 if dy > 0 else -1)
         step = int(self._scroll_accum)
         if step:
@@ -2549,8 +2573,10 @@ class _UpdateChecker(QThread):
             if not tag:
                 self.no_update.emit()
                 return
-            if (tuple(map(int, tag.split(".")))
-                    <= tuple(map(int, self._current.split(".")))):
+            def _ver(s: str) -> tuple:
+                p = list(map(int, s.split(".")))
+                return tuple(p + [0] * max(0, 4 - len(p)))
+            if _ver(tag) <= _ver(self._current):
                 self.no_update.emit()
                 return
             assets      = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
@@ -2621,6 +2647,7 @@ class NaroEditor(QMainWindow):
             self.restoreGeometry(QByteArray(bytes.fromhex(geom)))
         self._preview: PreviewWindow | None = None
         self._preview_mode: str = cfg.get("preview_mode", "float")
+        self._search_dialog: SearchReplaceDialog | None = None
         self._drag_editor: CodeEditor | None = None
         self._drag_pane: QTabWidget | None = None
         self._drag_mode: str = ""          # "" | "slide" | "float"
@@ -2670,8 +2697,7 @@ class NaroEditor(QMainWindow):
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self._main_splitter)
 
-        self._file_tree = FileTreePanel()
-        self._file_tree._lock_mgr = self._lock_mgr
+        self._file_tree = FileTreePanel(lock_mgr=self._lock_mgr)
         self._file_tree.file_opened.connect(self._open_path)
         self._file_tree.file_renamed.connect(self._on_file_renamed)
         self._file_tree.setMinimumWidth(120)
@@ -3191,14 +3217,15 @@ class NaroEditor(QMainWindow):
         if idx >= 0:
             self._close_tab(idx, self._active_pane)
 
-    def _on_tab_changed(self, _index: int) -> None:
+    def _on_pane_tab_changed(self, pane: QTabWidget, index: int) -> None:
+        self._active_pane = pane
         self._update_window_title()
         self._update_status()
         self._force_preview_update()
-
-    def _on_pane_tab_changed(self, pane: QTabWidget, index: int) -> None:
-        self._active_pane = pane
-        self._on_tab_changed(index)
+        if self._search_dialog is not None and self._search_dialog.isVisible():
+            e = self._editor
+            if e is not None:
+                self._search_dialog.set_editor(e)
 
     def _on_focus_changed(self, _old, new: QWidget) -> None:
         if new is None:
@@ -3342,8 +3369,6 @@ class NaroEditor(QMainWindow):
             (self._preview_mode == "float" and self._preview is not None)
             or (self._preview_mode == "dock" and self._dock_pane.isVisible())
         )
-        if self._preview is not None:
-            self._preview.close()
         for pane in list(self._panes):
             for i in range(pane.count()):
                 ed = pane.widget(i)
@@ -3382,6 +3407,8 @@ class NaroEditor(QMainWindow):
         cfg["splitter_sizes"] = self._main_splitter.sizes()
         cfg["window_geometry"] = bytes(self.saveGeometry()).hex()
         _save_cfg(cfg)
+        if self._preview is not None:
+            self._preview.close()
         self._lock_mgr.unlock_all()
         self._clear_recovery()
         event.accept()
@@ -3481,7 +3508,7 @@ class NaroEditor(QMainWindow):
             )
             return
 
-        tmp_naro = os.path.join(os.path.dirname(sys.executable), f"NaroEditor_{version}_new.exe")
+        tmp_naro = os.path.join(_UPDATER_DIR, f"NaroEditor_{version}_new.exe")
 
         dlg = QProgressDialog("", None, 0, 100, self)
         dlg.setWindowTitle("アップデート")
@@ -3499,12 +3526,15 @@ class NaroEditor(QMainWindow):
             dlg.setValue(0)
             self._dl_thread = _DownloadThread(naro_url, tmp_naro, self)
             self._dl_thread.progress.connect(dlg.setValue)
-            self._dl_thread.finished.connect(lambda path: (dlg.close(), self._launch_updater(version, path)))
+            def _on_naro_done(path: str) -> None:
+                dlg.close()
+                QTimer.singleShot(0, lambda: self._launch_updater(version, path))
+            self._dl_thread.finished.connect(_on_naro_done)
             self._dl_thread.error.connect(_on_error)
             self._dl_thread.start()
 
         if updater_url:
-            tmp_updater = os.path.join(os.path.dirname(sys.executable), "NaroEditorUpdater_new.exe")
+            tmp_updater = os.path.join(_UPDATER_DIR, "NaroEditorUpdater_new.exe")
             dlg.setLabelText("アップデータを更新中…")
 
             def _on_updater_done(path: str) -> None:
@@ -3544,6 +3574,8 @@ class NaroEditor(QMainWindow):
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             env=env,
         )
+        self._lock_mgr.unlock_all()
+        self._clear_recovery()
         QApplication.instance().quit()
 
     # ------------------------------------------------------------------
@@ -3792,12 +3824,24 @@ class NaroEditor(QMainWindow):
     # Search / Replace
     # ------------------------------------------------------------------
     def _show_search(self) -> None:
-        if self._editor:
-            SearchReplaceDialog(self, self._editor, "search").show()
+        self._open_search_dialog("search")
 
     def _show_replace(self) -> None:
-        if self._editor:
-            SearchReplaceDialog(self, self._editor, "replace").show()
+        self._open_search_dialog("replace")
+
+    def _open_search_dialog(self, mode: str) -> None:
+        e = self._editor
+        if e is None:
+            return
+        dlg = self._search_dialog
+        if dlg is None or not dlg.isVisible() or dlg._mode != mode:
+            dlg = SearchReplaceDialog(self, e, mode)
+            self._search_dialog = dlg
+            dlg.show()
+        else:
+            dlg.set_editor(e)
+            dlg.raise_()
+            dlg.activateWindow()
 
     # ------------------------------------------------------------------
     # Edit menu actions
@@ -3836,6 +3880,23 @@ class NaroEditor(QMainWindow):
         cur.endEditBlock()
         e.setTextCursor(cur)
 
+    @staticmethod
+    def _selected_block_range(
+        cur: "QTextCursor", doc: "QTextDocument"
+    ) -> "tuple[int, int]":
+        """選択範囲（または現在行）に対応するブロック番号の (first, last) を返す。
+        選択末尾がブロック先頭の場合そのブロックは含めない。"""
+        if cur.hasSelection():
+            s      = doc.findBlock(cur.selectionStart()).blockNumber()
+            end_pos = cur.selectionEnd()
+            eb     = doc.findBlock(end_pos)
+            n      = eb.blockNumber()
+            if eb.position() == end_pos and n > s:
+                n -= 1
+        else:
+            s = n = doc.findBlock(cur.position()).blockNumber()
+        return s, n
+
     def _indent(self) -> None:
         e = self._editor
         if e is None:
@@ -3845,12 +3906,7 @@ class NaroEditor(QMainWindow):
             cur.insertText("\t")
             return
         doc = e.document()
-        s = doc.findBlock(cur.selectionStart()).blockNumber()
-        end_pos = cur.selectionEnd()
-        eb = doc.findBlock(end_pos)
-        n = eb.blockNumber()
-        if eb.position() == end_pos and n > s:
-            n -= 1
+        s, n = self._selected_block_range(cur, doc)
         cur.beginEditBlock()
         for i in range(s, n + 1):
             QTextCursor(doc.findBlockByNumber(i)).insertText("\t")
@@ -3862,15 +3918,7 @@ class NaroEditor(QMainWindow):
             return
         cur = e.textCursor()
         doc = e.document()
-        if cur.hasSelection():
-            s = doc.findBlock(cur.selectionStart()).blockNumber()
-            end_pos = cur.selectionEnd()
-            eb = doc.findBlock(end_pos)
-            n = eb.blockNumber()
-            if eb.position() == end_pos and n > s:
-                n -= 1
-        else:
-            s = n = doc.findBlock(cur.position()).blockNumber()
+        s, n = self._selected_block_range(cur, doc)
         cur.beginEditBlock()
         for i in range(s, n + 1):
             blk = doc.findBlockByNumber(i)
@@ -3964,14 +4012,7 @@ class NaroEditor(QMainWindow):
             return
         cur = e.textCursor()
         doc = e.document()
-        if cur.hasSelection():
-            s  = doc.findBlock(cur.selectionStart()).blockNumber()
-            eb = doc.findBlock(cur.selectionEnd())
-            n  = eb.blockNumber()
-            if eb.position() == cur.selectionEnd() and n > s:
-                n -= 1
-        else:
-            s = n = doc.findBlock(cur.position()).blockNumber()
+        s, n = self._selected_block_range(cur, doc)
         cur.beginEditBlock()
         for i in range(s, n + 1):
             QTextCursor(doc.findBlockByNumber(i)).insertText("    ")
@@ -3983,14 +4024,7 @@ class NaroEditor(QMainWindow):
             return
         cur = e.textCursor()
         doc = e.document()
-        if cur.hasSelection():
-            s  = doc.findBlock(cur.selectionStart()).blockNumber()
-            eb = doc.findBlock(cur.selectionEnd())
-            n  = eb.blockNumber()
-            if eb.position() == cur.selectionEnd() and n > s:
-                n -= 1
-        else:
-            s = n = doc.findBlock(cur.position()).blockNumber()
+        s, n = self._selected_block_range(cur, doc)
         cur.beginEditBlock()
         for i in range(s, n + 1):
             blk  = doc.findBlockByNumber(i)

@@ -77,7 +77,8 @@ namespace NaroEditorUpdater
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool CloseHandle(IntPtr hObject);
 
-        private const uint SYNCHRONIZE = 0x00100000;
+        private const uint SYNCHRONIZE  = 0x00100000;
+        private const uint WAIT_TIMEOUT = 0x00000102;
 
         private readonly Label       _label;
         private readonly ProgressBar _bar;
@@ -123,6 +124,7 @@ namespace NaroEditorUpdater
         {
             try
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(_logPath));
                 File.AppendAllText(
                     _logPath,
                     string.Format("[{0}] {1}\r\n", DateTime.Now.ToString("HH:mm:ss.fff"), msg),
@@ -158,14 +160,20 @@ namespace NaroEditorUpdater
                 IntPtr h = OpenProcess(SYNCHRONIZE, false, _pid);
                 if (h != IntPtr.Zero)
                 {
-                    WaitForSingleObject(h, 30000);
+                    uint waitResult = WaitForSingleObject(h, 30000);
                     CloseHandle(h);
+                    if (waitResult == WAIT_TIMEOUT)
+                        Log("WaitForSingleObject timed out for PID=" + _pid
+                            + ". Proceeding with file replacement.");
                 }
                 else
                 {
+                    Log("OpenProcess failed for PID=" + _pid
+                        + ", Win32Error=" + Marshal.GetLastWin32Error()
+                        + ". Falling back to sleep.");
                     Thread.Sleep(2000);
                 }
-                Log("PID=" + _pid + " has exited.");
+                Log("PID=" + _pid + " wait complete.");
 
                 SetStatus(string.Format("NaroEditor v{0} を適用中…", _version), 50);
                 Thread.Sleep(300);
@@ -180,7 +188,8 @@ namespace NaroEditorUpdater
                         if (File.Exists(_target))
                         {
                             File.Replace(_source, _target, backup, true);
-                            try { if (File.Exists(backup)) File.Delete(backup); } catch { }
+                            try { if (File.Exists(backup)) File.Delete(backup); }
+                            catch (Exception bex) { Log("Backup cleanup failed: " + bex.Message); }
                         }
                         else
                         {
@@ -210,7 +219,7 @@ namespace NaroEditorUpdater
             {
                 Log("EXCEPTION: " + ex.GetType().Name + ": " + ex.Message
                     + "\r\n" + ex.StackTrace);
-                SetStatus(string.Format("エラー: {0}", ex.Message), 0);
+                SetStatus(string.Format("エラー: {0}  (8秒後に自動的に閉じます)", ex.Message), 0);
                 try { if (File.Exists(_source)) File.Delete(_source); } catch { }
                 Thread.Sleep(8000);
                 BeginInvoke((Action)Close);
