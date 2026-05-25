@@ -207,37 +207,63 @@ namespace NaroEditorUpdater
                 }
 
                 // 3. Launch updated NaroEditor
+                // NOTE: _MEI* dirs are intentionally NOT deleted here.
+                // NaroEditor calls _cleanup_mei_cache() at startup, which deletes stale
+                // dirs while preserving its own active extraction. Deleting here forces
+                // re-extraction on every update attempt and re-triggers AV scanning of
+                // the freshly written DLLs, causing a crash loop (exit code=-1).
                 SetStatus("再起動の準備中…", 85);
                 Thread.Sleep(3000);
 
-                string runtimeDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "NaroEditor", "runtime");
-                if (Directory.Exists(runtimeDir))
+                SetStatus("再起動中…", 90);
+                const int MAX_LAUNCH_ATTEMPTS = 3;
+                for (int attempt = 1; attempt <= MAX_LAUNCH_ATTEMPTS; attempt++)
                 {
-                    foreach (string meiDir in Directory.GetDirectories(runtimeDir, "_MEI*"))
+                    Log(string.Format("Launch attempt {0}/{1}: {2}", attempt, MAX_LAUNCH_ATTEMPTS, _target));
+                    Process proc = null;
+                    try
                     {
-                        try
-                        {
-                            Directory.Delete(meiDir, true);
-                            Log("Removed old MEI cache: " + meiDir);
-                        }
-                        catch (Exception ex)
-                        {
-                            Log("MEI cache remove failed (ignored): " + ex.Message);
-                        }
+                        proc = Process.Start(new ProcessStartInfo(_target) { UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("Process.Start failed: " + ex.Message);
+                        if (attempt == MAX_LAUNCH_ATTEMPTS) throw;
+                        Thread.Sleep(5000);
+                        continue;
+                    }
+
+                    if (proc == null)
+                    {
+                        Log("Process.Start returned null (shell activation). Assuming success.");
+                        break;
+                    }
+
+                    Log(string.Format("Process started, PID={0}. Watching for 8s...", proc.Id));
+                    bool exited = proc.WaitForExit(8000);
+                    if (!exited)
+                    {
+                        Log("Process still running after 8s → launch successful.");
+                        break;
+                    }
+
+                    int exitCode = proc.ExitCode;
+                    Log(string.Format("Process exited quickly, exit code={0}.", exitCode));
+                    if (attempt < MAX_LAUNCH_ATTEMPTS)
+                    {
+                        SetStatus(string.Format(
+                            "起動を確認中… ({0}/{1})。しばらくお待ちください…", attempt, MAX_LAUNCH_ATTEMPTS), 90);
+                        Log("Possible AV scan in progress. Waiting 45s before retry...");
+                        Thread.Sleep(45000);
+                    }
+                    else
+                    {
+                        throw new Exception(string.Format(
+                            "NaroEditor が {0} 回の起動試行後も終了しました (exit code={1})。" +
+                            "セキュリティソフトがブロックしている可能性があります。",
+                            MAX_LAUNCH_ATTEMPTS, exitCode));
                     }
                 }
-
-                SetStatus("再起動中…", 90);
-                Log("Launching: " + _target);
-                var psi = new ProcessStartInfo(_target)
-                {
-                    UseShellExecute = false,
-                    WorkingDirectory = Path.GetDirectoryName(_target) ?? "",
-                };
-                psi.EnvironmentVariables.Remove("_MEIPASS2");
-                Process.Start(psi);
                 Log("Launch succeeded.");
 
                 Thread.Sleep(800);

@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.28"
+APP_VERSION = "1.2.29"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -3521,9 +3521,11 @@ class NaroEditor(QMainWindow):
             dlg.setLabelText("アップデータを更新中…")
 
             def _on_updater_done(path: str) -> None:
+                copy_ok = False
                 try:
                     os.makedirs(_UPDATER_DIR, exist_ok=True)
                     shutil.copy2(path, _UPDATER_PATH)
+                    copy_ok = True
                 except OSError:
                     pass
                 finally:
@@ -3531,6 +3533,20 @@ class NaroEditor(QMainWindow):
                         os.remove(path)
                     except OSError:
                         pass
+                if not copy_ok:
+                    if not os.path.isfile(_UPDATER_PATH):
+                        dlg.close()
+                        QMessageBox.critical(
+                            self, "アップデート",
+                            "アップデータの更新に失敗し、既存のアップデータも見つかりません。\n"
+                            "アップデートを中止します。",
+                        )
+                        return
+                    QMessageBox.warning(
+                        self, "アップデート",
+                        "アップデータの更新に失敗しました。\n"
+                        "既存のアップデータでアップデートを続行します。",
+                    )
                 _start_naro_dl()
 
             self._updater_dl_thread = _DownloadThread(updater_url, tmp_updater, self)
