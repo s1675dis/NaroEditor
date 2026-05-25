@@ -180,7 +180,9 @@ namespace NaroEditorUpdater
 
                 // 2. Replace target with downloaded file (retry for file locks)
                 Log("Replacing: " + _source + " -> " + _target);
-                string backup = _target + ".bak";
+                string backup = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "NaroEditor", "NaroEditor.exe.bak");
                 for (int i = 0; i < 5; i++)
                 {
                     try
