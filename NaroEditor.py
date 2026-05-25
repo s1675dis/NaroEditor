@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.29"
+APP_VERSION = "1.2.30"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）

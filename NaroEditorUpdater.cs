@@ -251,10 +251,16 @@ namespace NaroEditorUpdater
                     Log(string.Format("Process exited quickly, exit code={0}.", exitCode));
                     if (attempt < MAX_LAUNCH_ATTEMPTS)
                     {
-                        SetStatus(string.Format(
-                            "起動を確認中… ({0}/{1})。しばらくお待ちください…", attempt, MAX_LAUNCH_ATTEMPTS), 90);
-                        Log("Possible AV scan in progress. Waiting 45s before retry...");
-                        Thread.Sleep(45000);
+                        const int RETRY_WAIT = 45;
+                        Log(string.Format(
+                            "Possible AV scan in progress. Waiting {0}s before retry...", RETRY_WAIT));
+                        for (int s = RETRY_WAIT; s > 0; s--)
+                        {
+                            SetStatus(string.Format(
+                                "セキュリティスキャン完了を待機中 ({0}/{1})  ― 再試行まで {2} 秒…",
+                                attempt, MAX_LAUNCH_ATTEMPTS, s), 90);
+                            Thread.Sleep(1000);
+                        }
                     }
                     else
                     {
