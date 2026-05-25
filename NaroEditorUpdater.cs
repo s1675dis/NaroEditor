@@ -206,74 +206,26 @@ namespace NaroEditorUpdater
                     }
                 }
 
-                // 3. Launch updated NaroEditor
-                // NOTE: _MEI* dirs are intentionally NOT deleted here.
-                // NaroEditor calls _cleanup_mei_cache() at startup, which deletes stale
-                // dirs while preserving its own active extraction. Deleting here forces
-                // re-extraction on every update attempt and re-triggers AV scanning of
-                // the freshly written DLLs, causing a crash loop (exit code=-1).
-                SetStatus("再起動の準備中…", 85);
-                Thread.Sleep(3000);
-
-                SetStatus("再起動中…", 90);
-                const int MAX_LAUNCH_ATTEMPTS = 3;
-                for (int attempt = 1; attempt <= MAX_LAUNCH_ATTEMPTS; attempt++)
+                // 3. Update complete — prompt manual restart
+                Log("Update complete. Prompting user to start manually.");
+                BeginInvoke((Action)(() =>
                 {
-                    Log(string.Format("Launch attempt {0}/{1}: {2}", attempt, MAX_LAUNCH_ATTEMPTS, _target));
-                    Process proc = null;
+                    SetStatus("アップデート完了", 100);
+                    MessageBox.Show(
+                        string.Format("NaroEditor v{0} へのアップデートが完了しました。\n\n", _version) +
+                        "NaroEditor.exe を手動で起動してください。\n" +
+                        "（フォルダを開きます）",
+                        "NaroEditor アップデート完了",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
                     try
                     {
-                        proc = Process.Start(new ProcessStartInfo(_target) { UseShellExecute = true });
+                        Process.Start("explorer.exe",
+                            string.Format("/select,\"{0}\"", _target));
                     }
-                    catch (Exception ex)
-                    {
-                        Log("Process.Start failed: " + ex.Message);
-                        if (attempt == MAX_LAUNCH_ATTEMPTS) throw;
-                        Thread.Sleep(5000);
-                        continue;
-                    }
-
-                    if (proc == null)
-                    {
-                        Log("Process.Start returned null (shell activation). Assuming success.");
-                        break;
-                    }
-
-                    Log(string.Format("Process started, PID={0}. Watching for 8s...", proc.Id));
-                    bool exited = proc.WaitForExit(8000);
-                    if (!exited)
-                    {
-                        Log("Process still running after 8s → launch successful.");
-                        break;
-                    }
-
-                    int exitCode = proc.ExitCode;
-                    Log(string.Format("Process exited quickly, exit code={0}.", exitCode));
-                    if (attempt < MAX_LAUNCH_ATTEMPTS)
-                    {
-                        const int RETRY_WAIT = 45;
-                        Log(string.Format(
-                            "Possible AV scan in progress. Waiting {0}s before retry...", RETRY_WAIT));
-                        for (int s = RETRY_WAIT; s > 0; s--)
-                        {
-                            SetStatus(string.Format(
-                                "セキュリティスキャン完了を待機中 ({0}/{1})  ― 再試行まで {2} 秒…",
-                                attempt, MAX_LAUNCH_ATTEMPTS, s), 90);
-                            Thread.Sleep(1000);
-                        }
-                    }
-                    else
-                    {
-                        throw new Exception(string.Format(
-                            "NaroEditor が {0} 回の起動試行後も終了しました (exit code={1})。" +
-                            "セキュリティソフトがブロックしている可能性があります。",
-                            MAX_LAUNCH_ATTEMPTS, exitCode));
-                    }
-                }
-                Log("Launch succeeded.");
-
-                Thread.Sleep(800);
-                BeginInvoke((Action)Close);
+                    catch { }
+                    Close();
+                }));
             }
             catch (Exception ex)
             {
