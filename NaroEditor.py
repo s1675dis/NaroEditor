@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.27"
+APP_VERSION = "1.2.28"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -41,23 +41,6 @@ _UPDATER_DIR  = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
 _UPDATER_NAME = "NaroEditorUpdater.exe"
 _UPDATER_PATH = os.path.join(_UPDATER_DIR, _UPDATER_NAME)
 
-
-def _ensure_updater() -> None:
-    """AppData に NaroEditorUpdater.exe がなければバンドル済みを展開する（frozen 時のみ）。
-    既存ファイルは上書きしない。更新時に GitHub 最新版が配置されるため。"""
-    if not getattr(sys, "frozen", False):
-        return
-    _cleanup_mei_cache()
-    if os.path.isfile(_UPDATER_PATH):
-        return
-    src = os.path.join(getattr(sys, "_MEIPASS", ""), _UPDATER_NAME)
-    if not os.path.isfile(src):
-        return
-    os.makedirs(_UPDATER_DIR, exist_ok=True)
-    try:
-        shutil.copy2(src, _UPDATER_PATH)
-    except OSError:
-        pass
 
 
 def _cleanup_mei_cache() -> None:
@@ -2676,7 +2659,7 @@ class NaroEditor(QMainWindow):
         except OSError:
             pass
         QTimer.singleShot(0, self._restore_session)
-        QTimer.singleShot(0, _ensure_updater)
+        QTimer.singleShot(0, _cleanup_mei_cache)
         QTimer.singleShot(3000, self._check_for_update)
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
 
@@ -3563,8 +3546,8 @@ class NaroEditor(QMainWindow):
     def _launch_updater(self, version: str, source: str) -> None:
         """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
         import subprocess
+        os.environ.pop("_MEIPASS2", None)
         env = os.environ.copy()
-        env.pop("_MEIPASS2", None)
         subprocess.Popen(
             [_UPDATER_PATH,
              "--pid",     str(os.getpid()),

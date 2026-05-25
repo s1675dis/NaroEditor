@@ -207,9 +207,37 @@ namespace NaroEditorUpdater
                 }
 
                 // 3. Launch updated NaroEditor
+                SetStatus("再起動の準備中…", 85);
+                Thread.Sleep(3000);
+
+                string runtimeDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "NaroEditor", "runtime");
+                if (Directory.Exists(runtimeDir))
+                {
+                    foreach (string meiDir in Directory.GetDirectories(runtimeDir, "_MEI*"))
+                    {
+                        try
+                        {
+                            Directory.Delete(meiDir, true);
+                            Log("Removed old MEI cache: " + meiDir);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("MEI cache remove failed (ignored): " + ex.Message);
+                        }
+                    }
+                }
+
                 SetStatus("再起動中…", 90);
                 Log("Launching: " + _target);
-                Process.Start(new ProcessStartInfo(_target) { UseShellExecute = true });
+                var psi = new ProcessStartInfo(_target)
+                {
+                    UseShellExecute = false,
+                    WorkingDirectory = Path.GetDirectoryName(_target) ?? "",
+                };
+                psi.EnvironmentVariables.Remove("_MEIPASS2");
+                Process.Start(psi);
                 Log("Launch succeeded.");
 
                 Thread.Sleep(800);
