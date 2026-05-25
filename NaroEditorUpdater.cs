@@ -213,17 +213,10 @@ namespace NaroEditorUpdater
                     SetStatus("アップデート完了", 100);
                     MessageBox.Show(
                         string.Format("NaroEditor v{0} へのアップデートが完了しました。\n\n", _version) +
-                        "NaroEditor.exe を手動で起動してください。\n" +
-                        "（フォルダを開きます）",
+                        "NaroEditor.exe を起動してください。",
                         "NaroEditor アップデート完了",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
-                    try
-                    {
-                        Process.Start("explorer.exe",
-                            string.Format("/select,\"{0}\"", _target));
-                    }
-                    catch { }
                     Close();
                 }));
             }
