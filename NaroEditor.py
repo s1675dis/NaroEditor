@@ -33,7 +33,7 @@ from PyQt6.QtGui import (
 )
 
 
-APP_VERSION = "1.2.33"
+APP_VERSION = "1.2.34"
 _GITHUB_API_LATEST = "https://api.github.com/repos/s1675dis/NaroEditor/releases/latest"
 
 # アップデータのパス（AppData\Roaming\NaroEditor\NaroEditorUpdater.exe）
@@ -2640,6 +2640,7 @@ class NaroEditor(QMainWindow):
         self._panes: list[QTabWidget] = []
         self._active_pane: QTabWidget | None = None
         self._lock_mgr = FileLockManager()
+        self._update_pending: tuple | None = None  # (version, source_path)
         self._build_ui()
         self._build_menu()
         self._autosave_timer = QTimer(self)
@@ -3394,6 +3395,10 @@ class NaroEditor(QMainWindow):
             self._preview.close()
         self._lock_mgr.unlock_all()
         self._clear_recovery()
+        if self._update_pending is not None:
+            version, source = self._update_pending
+            self._update_pending = None
+            self._start_updater_process(version, source)
         event.accept()
 
     def _restore_session(self) -> None:
@@ -3511,7 +3516,22 @@ class NaroEditor(QMainWindow):
             self._dl_thread.progress.connect(dlg.setValue)
             def _on_naro_done(path: str) -> None:
                 dlg.close()
-                QTimer.singleShot(0, lambda: self._launch_updater(version, path))
+                has_unsaved = any(
+                    isinstance(pane.widget(i), CodeEditor)
+                    and pane.widget(i).document().isModified()
+                    for pane in self._panes
+                    for i in range(pane.count())
+                )
+                if has_unsaved:
+                    self._update_pending = (version, path)
+                    QMessageBox.information(
+                        self, "アップデート準備完了",
+                        f"NaroEditor v{version} のダウンロードが完了しました。\n\n"
+                        "未保存のファイルがあります。\n"
+                        "保存またはキャンセルが完了次第、アップデートを開始します。",
+                    )
+                else:
+                    QTimer.singleShot(0, lambda: self._launch_updater(version, path))
             self._dl_thread.finished.connect(_on_naro_done)
             self._dl_thread.error.connect(_on_error)
             self._dl_thread.start()
@@ -3559,8 +3579,8 @@ class NaroEditor(QMainWindow):
 
         dlg.exec()
 
-    def _launch_updater(self, version: str, source: str) -> None:
-        """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
+    def _start_updater_process(self, version: str, source: str) -> None:
+        """NaroEditorUpdater.exe をデタッチ起動する（アプリ終了は行わない）。"""
         import subprocess
         os.environ.pop("_MEIPASS2", None)
         env = os.environ.copy()
@@ -3573,6 +3593,10 @@ class NaroEditor(QMainWindow):
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             env=env,
         )
+
+    def _launch_updater(self, version: str, source: str) -> None:
+        """ダウンロード済み EXE を渡して NaroEditorUpdater.exe を起動し、自身は終了する。"""
+        self._start_updater_process(version, source)
         self._lock_mgr.unlock_all()
         self._clear_recovery()
         QApplication.instance().quit()
